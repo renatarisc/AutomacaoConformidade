@@ -7,6 +7,7 @@ import pandas as pd
 import time
 
 import carregar_cores_planilha
+import escolher_planilha
 import pintar_celula_planilha
 
 PASTA_DOWNLOADS = Path.home() / "Downloads" # pasta onde o Sistema salva o PDF da OB (nome sequencial: 00000001.pdf, 00000002.pdf...)
@@ -45,7 +46,9 @@ def pdf_contem(caminho_pdf, ob, valor, processo):
     processo_ok = processo in conteudo or variante_barra_processo(processo) in conteudo
     return ob in conteudo and valor in conteudo and processo_ok
 
-def main():
+def main(nome_planilha=None):
+    # nome_planilha: passado pelo gui.py com a planilha escolhida na interface; rodando o
+    # script sozinho (sem gui.py), usa escolher_planilha.NOME_PLANILHA_PADRAO
     pyautogui.PAUSE = 0.5 # Pausa entre os comandos
 
     time.sleep(5)
@@ -63,9 +66,9 @@ def main():
     ]
     credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
     gc = gspread.authorize(credenciais)
-    planilha = gc.open("07. Jul") # apenas o nome da planilha, não precisa indicar o caminho
+    planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
     # aba = planilha.worksheet("RO")
-    aba = planilha.worksheet("TesteOB")
+    aba = planilha.worksheet("TesteNS")
 
     dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
     cores = carregar_cores_planilha.executar(aba) # chama a def

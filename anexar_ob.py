@@ -12,6 +12,7 @@ import pandas as pd
 import time # para fazer pausa
 
 import carregar_cores_planilha
+import escolher_planilha
 import pintar_celula_planilha
 import encaminhar_processo
 
@@ -87,7 +88,9 @@ def executar(navegador, var_OB):
 
     time.sleep(3)
 
-def main():
+def main(nome_planilha=None):
+    # nome_planilha: passado pelo gui.py com a planilha escolhida na interface; rodando o
+    # script sozinho (sem gui.py), usa escolher_planilha.NOME_PLANILHA_PADRAO
     # ------- Acessa a Planilha de Controle da Conformidade (mensal) -------
     SCOPES = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -95,8 +98,8 @@ def main():
     ]
     credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
     gc = gspread.authorize(credenciais)
-    planilha = gc.open("07. Jul") # apenas o nome da planilha, não precisa indicar o caminho
-    aba = planilha.worksheet("TesteOB")
+    planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
+    aba = planilha.worksheet("TesteNS")
 
     dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
     cores = carregar_cores_planilha.executar(aba) # chama a def

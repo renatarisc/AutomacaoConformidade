@@ -9,9 +9,24 @@ import gspread # para manipular as planilhas do Drive
 import pandas as pd
 import time # para fazer pausa
 
+import carregar_cores_planilha
+import escolher_planilha
 import pintar_celula_planilha
 
-def main():
+def eh_cinza(cor, tolerancia=0.01):
+    # aceita qualquer tom entre Cinza escuro 2 (#999999) e Cinza claro 1 (#d9d9d9) da paleta
+    # padrão do Sheets - não um cinza exato, já que a API arredonda a cor com menos precisão
+    if not cor:
+        return False
+    r, g, b = cor
+    if not (abs(r - g) < tolerancia and abs(g - b) < tolerancia): # tem que ser acromático (r≈g≈b)
+        return False
+    media = (r + g + b) / 3
+    return (153 / 255 - tolerancia) <= media <= (217 / 255 + tolerancia)
+
+def main(nome_planilha=None):
+    # nome_planilha: passado pelo gui.py com a planilha escolhida na interface; rodando o
+    # script sozinho (sem gui.py), usa escolher_planilha.NOME_PLANILHA_PADRAO
     # Para controlar um Chrome já aberto, precisa iniciar o Chrome em modo de depuração remota (remote debugging) e mandar o Selenium se conectar a ele
     # 1- Fecha todos os Chromes abertos
     # 2- No CMD: "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\ChromeSelenium"
@@ -25,11 +40,12 @@ def main():
     ]
     credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
     gc = gspread.authorize(credenciais)
-    planilha = gc.open("07. Jul") # apenas o nome da planilha, não precisa indicar o caminho
+    planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
     # aba = planilha.worksheet("RO")
     aba = planilha.worksheet("TesteNS")
 
     dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
+    cores = carregar_cores_planilha.executar(aba) # chama a def
 
     # as colunas OB ISS e OB PG guardam a OP relacionada pelo relacionar_valor_op.py; aqui ela é trocada pela OB correspondente
     COLUNAS_OB = [
@@ -45,10 +61,11 @@ def main():
         linha_planilha = linha + 2 # linha do DataFrame começa em 0, a planilha em 2 (cabeçalho na linha 1)
 
         for info in COLUNAS_OB:
-            valor_celula = str(dados.loc[linha, info["nome"]])
-
-            if "OP" not in valor_celula: # ignora célula em branco, "Não encontrado" ou que já tenha uma OB
+            # a célula pintada de cinza sinaliza que guarda uma OP ainda pendente de virar OB
+            if not eh_cinza(cores.get((linha_planilha, info["coluna"]))):
                 continue
+
+            valor_celula = str(dados.loc[linha, info["nome"]])
 
             lista_processo.append({
                 "linha_planilha": linha_planilha,
@@ -87,7 +104,7 @@ def main():
             continue
 
         aba.update_cell(processo["linha_planilha"], processo["coluna"], OB) # substitui a OP pela OB na mesma célula (OB ISS ou OB PG)
-        pintar_celula_planilha.executar(aba, processo["linha_planilha"], processo["coluna"], AMARELO_CLARO_1) # mantém o amarelo: sinaliza que a OB ainda precisa ser baixada
+        pintar_celula_planilha.executar(aba, processo["linha_planilha"], processo["coluna"], AMARELO_CLARO_1) # pinta de amarelo: sinaliza que a OB ainda precisa ser baixada
 
 if __name__ == "__main__":
     main()

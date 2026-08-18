@@ -4,18 +4,20 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from google.oauth2.service_account import Credentials
-import sys # para interromper o programa
 import gspread # para manipular as planilhas do Drive
 import pandas as pd
 import time
 
 import carregar_cores_planilha
+import escolher_planilha
 import pintar_celula_planilha
 import baixar_ne
 import anexar_ne
 import encaminhar_processo
 
-def main():
+def main(nome_planilha=None):
+    # nome_planilha: passado pelo gui.py com a planilha escolhida na interface; rodando o
+    # script sozinho (sem gui.py), usa escolher_planilha.NOME_PLANILHA_PADRAO
     # Para controlar um Chrome já aberto, precisa iniciar o Chrome em modo de depuração remota (remote debugging)
     # e mandar o Selenium se conectar a ele:
     # 1- Fecha todos os Chromes abertos
@@ -30,7 +32,7 @@ def main():
     ]
     credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
     gc = gspread.authorize(credenciais)
-    planilha = gc.open("07. Jul") # apenas o nome da planilha, não precisa indicar o caminho
+    planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
     # aba = planilha.worksheet("RO")
     aba = planilha.worksheet("TesteRO")
 
@@ -39,6 +41,11 @@ def main():
     # para descobrir a cor --> print(cores[(3, 1)]), sendo que 3,1 é célula A3. Retorno = (0, 1, 1) = azul "ciano"
 
     COLUNA_TRAMITADO = dados.columns.get_loc("TRAMITADO") + 1 # calculado pelo nome do cabeçalho, não fixo, pra não quebrar se a coluna mudar de lugar
+    COLUNA_DESPACHO = dados.columns.get_loc("DESPACHO") + 1
+
+    VERMELHO = (1, 0, 0)
+    BRANCO = (1, 1, 1)
+    AMARELO_CLARO_1 = (1, 217 / 255, 102 / 255) # mesmo amarelo usado nos outros scripts do pipeline
 
     lista_processo = []
     for linha in dados.index:
@@ -52,8 +59,6 @@ def main():
             conformado['NE'] = (dados.loc[linha, "NE"]) # = 2026NE510016
             conformado['despacho'] = (dados.loc[linha, "DESPACHO"])
             lista_processo.append(conformado)
-
-            pintar_celula_planilha.executar(aba, linha_planilha, 8, (0, 1, 0)) # pinta de verde a célula que estava cinza (na Planilha de Controle)
 
     # ------- Conecta o Selenium no navegador logado no Siafi -------
     options = webdriver.ChromeOptions()
@@ -77,7 +82,7 @@ def main():
     # ------- Faz o login no Suap -------
     navegador_suap.find_element(By.ID, "id_username").send_keys("1882905")
     navegador_suap.find_element(By.ID, "id_password").send_keys("Aj250104!" + Keys.ENTER)
-    time.sleep(10)
+    time.sleep(15)
 
     for linha in lista_processo:
 
@@ -95,14 +100,21 @@ def main():
             if despacho:
                 encaminhar_processo.executar(navegador_suap, despacho)
                 aba.update_cell(linha["linha_planilha"], COLUNA_TRAMITADO, "OK") # só marca se a tramitação realmente aconteceu
+                pintar_celula_planilha.executar(aba, linha["linha_planilha"], 8, BRANCO) # anexou e tramitou: NE totalmente concluída
+            else:
+                # anexou mas não tem despacho pra tramitar: NE concluída mesmo assim, e o despacho fica
+                # sinalizado de amarelo pra alguém preencher manualmente depois
+                pintar_celula_planilha.executar(aba, linha["linha_planilha"], 8, BRANCO)
+                pintar_celula_planilha.executar(aba, linha["linha_planilha"], COLUNA_DESPACHO, AMARELO_CLARO_1)
 
             navegador_suap.get("http://suap.dev.iff.edu.br/")  # volta para a tela de início, onde tem o campo Busca rápida
             # navegador_suap.get("http://suap.iff.edu.br/")
             time.sleep(10)
 
         except Exception as e:
+            # não interrompe mais o script inteiro: pinta de vermelho essa NE e segue para as próximas, igual ao baixar_ob.py
             print(f"Erro no empenho {NE} ao executar anexarNE: {e}")
-            sys.exit()  # interrompe o programa
+            pintar_celula_planilha.executar(aba, linha["linha_planilha"], 8, VERMELHO)
 
 if __name__ == "__main__":
     main()

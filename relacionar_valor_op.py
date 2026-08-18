@@ -9,6 +9,7 @@ import gspread # para manipular as planilhas do Drive
 import pandas as pd
 import time
 
+import escolher_planilha
 import pintar_celula_planilha
 
 def valor_brl_para_float(valor_str):
@@ -19,7 +20,9 @@ def valor_brl_para_float(valor_str):
     valor_str = valor_str.replace(".", "").replace(",", ".")
     return float(valor_str)
 
-def main():
+def main(nome_planilha=None):
+    # nome_planilha: passado pelo gui.py com a planilha escolhida na interface; rodando o
+    # script sozinho (sem gui.py), usa escolher_planilha.NOME_PLANILHA_PADRAO
     # Para controlar um Chrome já aberto, precisa iniciar o Chrome em modo de depuração remota (remote debugging)
     # e mandar o Selenium se conectar a ele:
     # 1- Fecha todos os Chromes abertos
@@ -34,7 +37,7 @@ def main():
     ]
     credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
     gc = gspread.authorize(credenciais)
-    planilha = gc.open("07. Jul") # apenas o nome da planilha, não precisa indicar o caminho
+    planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
     # aba = planilha.worksheet("RO")
     aba = planilha.worksheet("TesteNS")
 
@@ -117,7 +120,7 @@ def main():
         if not encontrou:
             aba.update_cell(processo["linha_planilha"], processo["coluna_ob"], "Não encontrado") # escreve na própria célula da OB, já que não achou o valor no Siafi
 
-    print("OPs relacionadas:")
+    print("OPs relacionadas aos valores. Pedir assinatura:")
     for OP in ops_relacionadas:
         print(OP)
 
