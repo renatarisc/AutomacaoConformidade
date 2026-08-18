@@ -15,21 +15,6 @@ import carregar_cores_planilha
 import pintar_celula_planilha
 import encaminhar_processo
 
-# ------- Acessa a Planilha de Controle da Conformidade (mensal) -------
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
-gc = gspread.authorize(credenciais)
-planilha = gc.open("07. Jul") # apenas o nome da planilha, não precisa indicar o caminho
-aba = planilha.worksheet("TesteOB")
-
-dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
-cores = carregar_cores_planilha.executar(aba) # chama a def
-
-COLUNA_TRAMITADO = dados.columns.get_loc("TRAMITADO") + 1 # calculado pelo nome do cabeçalho, não fixo, pra não quebrar se a coluna mudar de lugar
-
 # a cor amarelo claro 1 sinaliza que a OB (ISS ou PG) já foi baixada pelo baixar_ob.py e ainda precisa ser anexada ao processo
 COLUNAS_OB = [
     {"coluna": 7, "nome": "OB ISS"},
@@ -46,25 +31,6 @@ def cor_bate(cor_celula, cor_alvo, tolerancia=0.01):
     if not cor_celula:
         return False
     return all(abs(c - alvo) < tolerancia for c, alvo in zip(cor_celula, cor_alvo))
-
-# agrupa por linha (processo), pois um mesmo processo pode ter OB ISS e OB PG pendentes ao mesmo tempo,
-# e o processo só deve ser tramitado uma vez, depois de anexar todas as OBs pendentes dele
-lista_processo = []
-for linha in dados.index:
-    linha_planilha = linha + 2 # linha do DataFrame começa em 0, a planilha em 2 (cabeçalho na linha 1)
-
-    obs_pendentes = [
-        {"coluna": info["coluna"], "OB": dados.loc[linha, info["nome"]]}
-        for info in COLUNAS_OB
-        if cor_bate(cores.get((linha_planilha, info["coluna"])), AMARELO_CLARO_1)
-    ]
-    if obs_pendentes:
-        lista_processo.append({
-            "linha_planilha": linha_planilha,
-            "processo": str(dados.loc[linha, "Processo"]).strip(),
-            "despacho": str(dados.loc[linha, "DESPACHO"]).strip(),
-            "obs": obs_pendentes,
-        })
 
 def executar(navegador, var_OB):
 
@@ -121,47 +87,85 @@ def executar(navegador, var_OB):
 
     time.sleep(3)
 
-# ------- Abre o Chrome maximizado -------
-options = webdriver.ChromeOptions()
-options.add_experimental_option("detach", True)  # detach=True p/ impedir que o Selenium feche o navegador ao terminar a execução ou quando ocorrer um erro
-navegador_suap = webdriver.Chrome(options=options)  # navegador controlado pelo Selenium | o Chrome tem mais compatibilidade com os sites
-navegador_suap.maximize_window()
+def main():
+    # ------- Acessa a Planilha de Controle da Conformidade (mensal) -------
+    SCOPES = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
+    gc = gspread.authorize(credenciais)
+    planilha = gc.open("07. Jul") # apenas o nome da planilha, não precisa indicar o caminho
+    aba = planilha.worksheet("TesteOB")
 
-# ------- Entra na tela de login do Suap -------
-# navegador_suap.get("https://suap.iff.edu.br/accounts/login/?next=/")  # pode ser o caminho de um arquivo local
-navegador_suap.get("http://suap.dev.iff.edu.br/accounts/login/?next=/")
+    dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
+    cores = carregar_cores_planilha.executar(aba) # chama a def
 
-# ------- Faz o login no Suap -------
-navegador_suap.find_element(By.ID, "id_username").send_keys("1882905")
-navegador_suap.find_element(By.ID, "id_password").send_keys("Aj250104!" + Keys.ENTER)
-time.sleep(10)
+    COLUNA_TRAMITADO = dados.columns.get_loc("TRAMITADO") + 1 # calculado pelo nome do cabeçalho, não fixo, pra não quebrar se a coluna mudar de lugar
 
-for processo in lista_processo:
+    # agrupa por linha (processo), pois um mesmo processo pode ter OB ISS e OB PG pendentes ao mesmo tempo,
+    # e o processo só deve ser tramitado uma vez, depois de anexar todas as OBs pendentes dele
+    lista_processo = []
+    for linha in dados.index:
+        linha_planilha = linha + 2 # linha do DataFrame começa em 0, a planilha em 2 (cabeçalho na linha 1)
 
-    # ------- Localiza o processo e carrega na página -------
-    campo_busca_rapida = WebDriverWait(navegador_suap, 30).until(EC.element_to_be_clickable((By.NAME, "q")))
-    campo_busca_rapida.clear()
-    campo_busca_rapida.send_keys(processo["processo"] + Keys.ENTER)
+        obs_pendentes = [
+            {"coluna": info["coluna"], "OB": dados.loc[linha, info["nome"]]}
+            for info in COLUNAS_OB
+            if cor_bate(cores.get((linha_planilha, info["coluna"])), AMARELO_CLARO_1)
+        ]
+        if obs_pendentes:
+            lista_processo.append({
+                "linha_planilha": linha_planilha,
+                "processo": str(dados.loc[linha, "Processo"]).strip(),
+                "despacho": str(dados.loc[linha, "DESPACHO"]).strip(),
+                "obs": obs_pendentes,
+            })
 
-    todas_anexadas = True
-    for info in processo["obs"]:
-        try:
-            executar(navegador_suap, info["OB"])
-            pintar_celula_planilha.executar(aba, processo["linha_planilha"], info["coluna"], BRANCO)
-        except Exception as e:
-            print(f"Erro ao anexar a OB {info['OB']}: {e}")
-            pintar_celula_planilha.executar(aba, processo["linha_planilha"], info["coluna"], VERMELHO)
-            todas_anexadas = False
+    # ------- Abre o Chrome maximizado -------
+    options = webdriver.ChromeOptions()
+    options.add_experimental_option("detach", True)  # detach=True p/ impedir que o Selenium feche o navegador ao terminar a execução ou quando ocorrer um erro
+    navegador_suap = webdriver.Chrome(options=options)  # navegador controlado pelo Selenium | o Chrome tem mais compatibilidade com os sites
+    navegador_suap.maximize_window()
 
-    # só tramita o processo se todas as OBs pendentes dele foram anexadas com sucesso;
-    # senão o processo sai da fila do usuário antes de dar pra tentar de novo a que falhou
-    if todas_anexadas and processo["despacho"]:
-        try:
-            encaminhar_processo.executar(navegador_suap, processo["despacho"])
-            aba.update_cell(processo["linha_planilha"], COLUNA_TRAMITADO, "OK") # só marca se a tramitação realmente aconteceu
-        except Exception as e:
-            print(f"Erro ao tramitar o processo {processo['processo']}: {e}")
+    # ------- Entra na tela de login do Suap -------
+    # navegador_suap.get("https://suap.iff.edu.br/accounts/login/?next=/")  # pode ser o caminho de um arquivo local
+    navegador_suap.get("http://suap.dev.iff.edu.br/accounts/login/?next=/")
 
-    navegador_suap.get("http://suap.dev.iff.edu.br/")  # volta para a tela de início, onde tem o campo Busca rápida
-    # navegador_suap.get("http://suap.iff.edu.br/")
+    # ------- Faz o login no Suap -------
+    navegador_suap.find_element(By.ID, "id_username").send_keys("1882905")
+    navegador_suap.find_element(By.ID, "id_password").send_keys("Aj250104!" + Keys.ENTER)
     time.sleep(10)
+
+    for processo in lista_processo:
+
+        # ------- Localiza o processo e carrega na página -------
+        campo_busca_rapida = WebDriverWait(navegador_suap, 30).until(EC.element_to_be_clickable((By.NAME, "q")))
+        campo_busca_rapida.clear()
+        campo_busca_rapida.send_keys(processo["processo"] + Keys.ENTER)
+
+        todas_anexadas = True
+        for info in processo["obs"]:
+            try:
+                executar(navegador_suap, info["OB"])
+                pintar_celula_planilha.executar(aba, processo["linha_planilha"], info["coluna"], BRANCO)
+            except Exception as e:
+                print(f"Erro ao anexar a OB {info['OB']}: {e}")
+                pintar_celula_planilha.executar(aba, processo["linha_planilha"], info["coluna"], VERMELHO)
+                todas_anexadas = False
+
+        # só tramita o processo se todas as OBs pendentes dele foram anexadas com sucesso;
+        # senão o processo sai da fila do usuário antes de dar pra tentar de novo a que falhou
+        if todas_anexadas and processo["despacho"]:
+            try:
+                encaminhar_processo.executar(navegador_suap, processo["despacho"])
+                aba.update_cell(processo["linha_planilha"], COLUNA_TRAMITADO, "OK") # só marca se a tramitação realmente aconteceu
+            except Exception as e:
+                print(f"Erro ao tramitar o processo {processo['processo']}: {e}")
+
+        navegador_suap.get("http://suap.dev.iff.edu.br/")  # volta para a tela de início, onde tem o campo Busca rápida
+        # navegador_suap.get("http://suap.iff.edu.br/")
+        time.sleep(10)
+
+if __name__ == "__main__":
+    main()

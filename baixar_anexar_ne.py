@@ -15,90 +15,94 @@ import baixar_ne
 import anexar_ne
 import encaminhar_processo
 
-# Para controlar um Chrome já aberto, precisa iniciar o Chrome em modo de depuração remota (remote debugging)
-# e mandar o Selenium se conectar a ele:
-# 1- Fecha todos os Chromes abertos
-# 2- No CMD: "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\ChromeSelenium"
-# 3- Faz login no Sistema que deseja (Siafi)
-# 4- Conecta o Selenium no navegador logado no Siafi (depois que pego os dados da Planilha de Controle)
+def main():
+    # Para controlar um Chrome já aberto, precisa iniciar o Chrome em modo de depuração remota (remote debugging)
+    # e mandar o Selenium se conectar a ele:
+    # 1- Fecha todos os Chromes abertos
+    # 2- No CMD: "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\ChromeSelenium"
+    # 3- Faz login no Sistema que deseja (Siafi)
+    # 4- Conecta o Selenium no navegador logado no Siafi (depois que pego os dados da Planilha de Controle)
 
-# ------- Acessa a Planilha de Controle da Conformidade (mensal) -------
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
-gc = gspread.authorize(credenciais)
-planilha = gc.open("07. Jul") # apenas o nome da planilha, não precisa indicar o caminho
-# aba = planilha.worksheet("RO")
-aba = planilha.worksheet("TesteRO")
+    # ------- Acessa a Planilha de Controle da Conformidade (mensal) -------
+    SCOPES = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
+    gc = gspread.authorize(credenciais)
+    planilha = gc.open("07. Jul") # apenas o nome da planilha, não precisa indicar o caminho
+    # aba = planilha.worksheet("RO")
+    aba = planilha.worksheet("TesteRO")
 
-dados = pd.DataFrame(aba.get_all_records()) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
-cores = carregar_cores_planilha.executar(aba) # chama a def
-# para descobrir a cor --> print(cores[(3, 1)]), sendo que 3,1 é célula A3. Retorno = (0, 1, 1) = azul "ciano"
+    dados = pd.DataFrame(aba.get_all_records()) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
+    cores = carregar_cores_planilha.executar(aba) # chama a def
+    # para descobrir a cor --> print(cores[(3, 1)]), sendo que 3,1 é célula A3. Retorno = (0, 1, 1) = azul "ciano"
 
-COLUNA_TRAMITADO = dados.columns.get_loc("TRAMITADO") + 1 # calculado pelo nome do cabeçalho, não fixo, pra não quebrar se a coluna mudar de lugar
+    COLUNA_TRAMITADO = dados.columns.get_loc("TRAMITADO") + 1 # calculado pelo nome do cabeçalho, não fixo, pra não quebrar se a coluna mudar de lugar
 
-lista_processo = []
-for linha in dados.index:
-    linha_planilha = linha + 2 # linha do DataFrame começa em 0, a planilha em 2 (cabeçalho na linha 1)
+    lista_processo = []
+    for linha in dados.index:
+        linha_planilha = linha + 2 # linha do DataFrame começa em 0, a planilha em 2 (cabeçalho na linha 1)
 
-    # pega as informações do empenho com célula CINZA: foi assinado e deve ser baixado no Siafi
-    if cores.get((linha_planilha, 8)) == (0.8, 0.8, 0.8):
-        conformado = {}
-        conformado['linha_planilha'] = linha_planilha
-        conformado['processo'] = (dados.loc[linha, "PROCESSO"])
-        conformado['NE'] = (dados.loc[linha, "NE"]) # = 2026NE510016
-        conformado['despacho'] = (dados.loc[linha, "DESPACHO"])
-        lista_processo.append(conformado)
+        # pega as informações do empenho com célula CINZA: foi assinado e deve ser baixado no Siafi
+        if cores.get((linha_planilha, 8)) == (0.8, 0.8, 0.8):
+            conformado = {}
+            conformado['linha_planilha'] = linha_planilha
+            conformado['processo'] = (dados.loc[linha, "PROCESSO"])
+            conformado['NE'] = (dados.loc[linha, "NE"]) # = 2026NE510016
+            conformado['despacho'] = (dados.loc[linha, "DESPACHO"])
+            lista_processo.append(conformado)
 
-        pintar_celula_planilha.executar(aba, linha_planilha, 8, (0, 1, 0)) # pinta de verde a célula que estava cinza (na Planilha de Controle)
+            pintar_celula_planilha.executar(aba, linha_planilha, 8, (0, 1, 0)) # pinta de verde a célula que estava cinza (na Planilha de Controle)
 
-# ------- Conecta o Selenium no navegador logado no Siafi -------
-options = webdriver.ChromeOptions()
-options.debugger_address = "127.0.0.1:9222"
-navegador_siafi = webdriver.Chrome(options=options)
+    # ------- Conecta o Selenium no navegador logado no Siafi -------
+    options = webdriver.ChromeOptions()
+    options.debugger_address = "127.0.0.1:9222"
+    navegador_siafi = webdriver.Chrome(options=options)
 
-for linha in lista_processo:
-    numero_NE = linha["NE"].replace("2026NE", "") # = 510016
-    baixar_ne.executar(navegador_siafi, numero_NE)
+    for linha in lista_processo:
+        numero_NE = linha["NE"].replace("2026NE", "") # = 510016
+        baixar_ne.executar(navegador_siafi, numero_NE)
 
-# ------- Abre o Chrome maximizado -------
-options = webdriver.ChromeOptions()
-options.add_experimental_option("detach", True)  # detach=True p/ impedir que o Selenium feche o navegador ao terminar a execução ou quando ocorrer um erro
-navegador_suap = webdriver.Chrome(options=options)  # navegador controlado pelo Selenium | o Chrome tem mais compatibilidade com os sites
-navegador_suap.maximize_window()
+    # ------- Abre o Chrome maximizado -------
+    options = webdriver.ChromeOptions()
+    options.add_experimental_option("detach", True)  # detach=True p/ impedir que o Selenium feche o navegador ao terminar a execução ou quando ocorrer um erro
+    navegador_suap = webdriver.Chrome(options=options)  # navegador controlado pelo Selenium | o Chrome tem mais compatibilidade com os sites
+    navegador_suap.maximize_window()
 
-# ------- Entra na tela de login do Suap -------
-# navegador_suap.get("https://suap.iff.edu.br/accounts/login/?next=/")  # pode ser o caminho de um arquivo local
-navegador_suap.get("http://suap.dev.iff.edu.br/accounts/login/?next=/")
+    # ------- Entra na tela de login do Suap -------
+    # navegador_suap.get("https://suap.iff.edu.br/accounts/login/?next=/")  # pode ser o caminho de um arquivo local
+    navegador_suap.get("http://suap.dev.iff.edu.br/accounts/login/?next=/")
 
-# ------- Faz o login no Suap -------
-navegador_suap.find_element(By.ID, "id_username").send_keys("1882905")
-navegador_suap.find_element(By.ID, "id_password").send_keys("Aj250104!" + Keys.ENTER)
-time.sleep(10)
+    # ------- Faz o login no Suap -------
+    navegador_suap.find_element(By.ID, "id_username").send_keys("1882905")
+    navegador_suap.find_element(By.ID, "id_password").send_keys("Aj250104!" + Keys.ENTER)
+    time.sleep(10)
 
-for linha in lista_processo:
+    for linha in lista_processo:
 
-    processo = linha["processo"]
-    NE = linha["NE"] # = 2026NE510016
-    despacho = linha["despacho"]
+        processo = linha["processo"]
+        NE = linha["NE"] # = 2026NE510016
+        despacho = linha["despacho"]
 
-    # ------- Localiza o processo e carrega na página -------
-    campo_busca_rapida = WebDriverWait(navegador_suap, 30).until(EC.element_to_be_clickable((By.NAME, "q")))
-    campo_busca_rapida.clear()
-    campo_busca_rapida.send_keys(processo + Keys.ENTER)
+        # ------- Localiza o processo e carrega na página -------
+        campo_busca_rapida = WebDriverWait(navegador_suap, 30).until(EC.element_to_be_clickable((By.NAME, "q")))
+        campo_busca_rapida.clear()
+        campo_busca_rapida.send_keys(processo + Keys.ENTER)
 
-    try:
-        anexar_ne.executar(navegador_suap, NE)
-        if despacho:
-            encaminhar_processo.executar(navegador_suap, despacho)
-            aba.update_cell(linha["linha_planilha"], COLUNA_TRAMITADO, "OK") # só marca se a tramitação realmente aconteceu
+        try:
+            anexar_ne.executar(navegador_suap, NE)
+            if despacho:
+                encaminhar_processo.executar(navegador_suap, despacho)
+                aba.update_cell(linha["linha_planilha"], COLUNA_TRAMITADO, "OK") # só marca se a tramitação realmente aconteceu
 
-        navegador_suap.get("http://suap.dev.iff.edu.br/")  # volta para a tela de início, onde tem o campo Busca rápida
-        # navegador_suap.get("http://suap.iff.edu.br/")
-        time.sleep(10)
+            navegador_suap.get("http://suap.dev.iff.edu.br/")  # volta para a tela de início, onde tem o campo Busca rápida
+            # navegador_suap.get("http://suap.iff.edu.br/")
+            time.sleep(10)
 
-    except Exception as e:
-        print(f"Erro no empenho {NE} ao executar anexarNE: {e}")
-        sys.exit()  # interrompe o programa
+        except Exception as e:
+            print(f"Erro no empenho {NE} ao executar anexarNE: {e}")
+            sys.exit()  # interrompe o programa
+
+if __name__ == "__main__":
+    main()
