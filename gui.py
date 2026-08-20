@@ -137,7 +137,7 @@ class Api:
             return # já tem algo rodando
 
         if not nome_planilha:
-            self.window.evaluate_js(f"definirStatus({json.dumps('⚠ Escolha a Planilha de Controle antes de executar.')})")
+            self.window.evaluate_js(f"definirEstado('aviso', {json.dumps('Escolha a Planilha de Controle antes de executar.')})")
             return
 
         opcao = OPCOES_POR_ARQUIVO.get(arquivo)
@@ -145,7 +145,7 @@ class Api:
             return
 
         self.executando = True
-        self.window.evaluate_js(f"definirStatus({json.dumps(f'⏳ Executando {arquivo} (planilha: {nome_planilha})...')})")
+        self.window.evaluate_js(f"definirEstado('executando', {json.dumps(f'Executando {arquivo} (planilha: {nome_planilha})...')})")
         self.window.evaluate_js("definirExecutando(true)")
 
         thread = threading.Thread(target=self._rodar, args=(opcao, nome_planilha), daemon=True)
@@ -173,9 +173,9 @@ class Api:
 
         self.executando = False
         if codigo_retorno == 0:
-            self.window.evaluate_js(f"definirStatus({json.dumps('✅ Concluído.')})")
+            self.window.evaluate_js(f"definirEstado('sucesso', {json.dumps('Concluído.')})")
         else:
-            self.window.evaluate_js(f"definirStatus({json.dumps(f'❌ Terminou com erro (código {codigo_retorno}).')})")
+            self.window.evaluate_js(f"definirEstado('erro', {json.dumps(f'Terminou com erro (código {codigo_retorno}).')})")
         self.window.evaluate_js("definirExecutando(false)")
 
 HTML_INTERFACE = r"""
@@ -186,16 +186,25 @@ HTML_INTERFACE = r"""
 <title>Automação da Conformidade</title>
 <style>
   :root {
-    --bg: #eef1f0;
-    --surface: #ffffff;
-    --border: #d7ddda;
-    --accent: #45a37e;
-    --accent-soft: #7fb89e;
-    --text: #23292c;
-    --text-muted: #667077;
-    --console-bg: #1e1e1e;
-    --console-fg: #e6e6e6;
-    --status-info: #2f8fd6;
+    --mist: #f2f5f3;
+    --mist-deep: #e7ece9;
+    --cloud: #ffffff;
+    --hairline: #dde4e0;
+    --ink: #16201b;
+    --ink-soft: #56625b;
+    --ink-faint: #8a958e;
+    --pine: #45a37e;
+    --pine-deep: #35815f;
+    --pine-tint: #e6f3ec;
+    --pine-tint-strong: #cfe9db;
+    --console-bg: #1a1d1b;
+    --console-fg: #e7ece9;
+    --status-info: #2f7fd6;
+    --status-success: #2f9e63;
+    --status-warning: #b3800b;
+    --status-error: #d1453d;
+    --shadow-1: 0 1px 2px rgba(20,32,27,0.07), 0 1px 1px rgba(20,32,27,0.05);
+    --shadow-2: 0 6px 16px rgba(20,32,27,0.12), 0 2px 4px rgba(20,32,27,0.08);
   }
 
   * { box-sizing: border-box; }
@@ -203,10 +212,17 @@ HTML_INTERFACE = r"""
   html, body {
     margin: 0;
     height: 100%;
-    background: var(--bg);
-    color: var(--text);
-    font-family: "Segoe UI", "Segoe UI Variable", system-ui, sans-serif;
+    background: var(--mist);
+    color: var(--ink);
+    font-family: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
     font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    background:
+      radial-gradient(1100px 620px at 8% -8%, var(--pine-tint) 0%, transparent 55%),
+      var(--mist);
   }
 
   .app {
@@ -218,36 +234,50 @@ HTML_INTERFACE = r"""
   .coluna {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 18px 22px;
+    gap: 14px;
+    padding: 22px 26px;
     min-width: 0;
     overflow-y: auto;
   }
 
-  .coluna--2 { border-left: 1px solid var(--border); }
+  .coluna--2 { border-left: 1px solid var(--hairline); }
+
+  .cabecalho { display: flex; align-items: center; gap: 10px; }
+
+  .marca-icone {
+    width: 34px; height: 34px; border-radius: 8px;
+    background: var(--pine);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; box-shadow: var(--shadow-1); flex: 0 0 auto;
+  }
 
   h1 {
-    display: flex;
-    align-items: center;
-    gap: 8px;
     margin: 0;
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--accent);
+    font-size: 19px;
+    font-weight: 600;
     letter-spacing: -0.01em;
   }
 
-  .subtitulo { margin: 2px 0 4px; color: var(--accent-soft); font-size: 13px; }
+  .subtitulo { margin: 2px 0 0; color: var(--ink-soft); font-size: 12.5px; }
 
-  .caixa-destaque {
-    border: 2px solid var(--accent);
-    border-radius: 6px;
-    background: var(--surface);
-    padding: 10px 12px;
+  .painel {
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    background: var(--cloud);
+    box-shadow: var(--shadow-1);
+    padding: 12px 14px;
     flex: 0 0 auto;
   }
 
-  .caixa-destaque .rotulo { font-weight: 700; font-size: 12.5px; margin: 0 0 6px; }
+  .painel--acento { border-color: var(--pine-tint-strong); background: var(--pine-tint); }
+
+  .rotulo {
+    font-weight: 600; font-size: 12px; margin: 0 0 8px;
+    display: flex; align-items: center; gap: 6px;
+    color: var(--ink);
+  }
+
+  .rotulo .ponto { width: 6px; height: 6px; border-radius: 50%; background: var(--pine); flex: 0 0 auto; }
 
   .linha-controle { display: flex; gap: 8px; }
 
@@ -256,92 +286,141 @@ HTML_INTERFACE = r"""
     min-width: 0;
     font-family: inherit;
     font-size: 13px;
-    padding: 6px 8px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--surface);
-    color: var(--text);
+    padding: 7px 10px;
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    background: var(--cloud);
+    color: var(--ink);
+    transition: border-color 120ms ease, box-shadow 120ms ease;
   }
 
-  input.campo-comando { font-family: "Consolas", "Cascadia Mono", monospace; font-size: 12px; color: var(--text-muted); }
+  select:focus-visible, input.campo-comando:focus-visible, .btn:focus-visible {
+    outline: none;
+    border-color: var(--pine);
+    box-shadow: 0 0 0 3px var(--pine-tint-strong);
+  }
+
+  input.campo-comando { font-family: "Cascadia Code", "Consolas", monospace; font-size: 11.5px; color: var(--ink-soft); }
 
   .btn {
     font-family: inherit;
     font-size: 12.5px;
     font-weight: 600;
-    border: none;
-    border-radius: 4px;
+    border: 1px solid transparent;
+    border-radius: 6px;
     cursor: pointer;
     white-space: nowrap;
+    transition: background 120ms ease, border-color 120ms ease, transform 80ms ease, box-shadow 120ms ease;
   }
 
-  .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
-  .btn--icone { padding: 6px 10px; background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
-  .btn--outline { padding: 6px 14px; background: transparent; border: 1px solid var(--accent); color: var(--accent); }
-  .btn--outline:hover { background: rgba(69, 163, 126, 0.1); }
+  .btn--icone { padding: 7px 11px; background: var(--cloud); border-color: var(--hairline); color: var(--ink-soft); }
+  .btn--icone:hover:not(:disabled) { border-color: var(--pine); color: var(--pine); }
 
-  .ajuda { margin: 6px 0 0; font-size: 11.5px; color: var(--text-muted); }
+  .btn--outline { padding: 7px 16px; background: var(--cloud); border-color: var(--hairline); color: var(--ink); }
+  .btn--outline:hover:not(:disabled) { border-color: var(--pine); color: var(--pine-deep); }
+
+  .ajuda { margin: 6px 0 0; font-size: 11px; color: var(--ink-faint); }
 
   .card {
     display: flex;
     align-items: center;
-    gap: 12px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface);
-    padding: 10px 14px;
+    gap: 13px;
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    background: var(--cloud);
+    box-shadow: var(--shadow-1);
+    padding: 11px 14px;
     flex: 0 0 auto;
+    transition: box-shadow 150ms ease, border-color 150ms ease, transform 150ms ease;
   }
 
-  .card__icone { flex: 0 0 auto; width: 34px; text-align: center; font-size: 20px; line-height: 1; }
+  .card:hover { box-shadow: var(--shadow-2); border-color: var(--pine-tint-strong); transform: translateY(-1px); }
+
+  .card__icone {
+    flex: 0 0 auto; width: 36px; height: 36px; border-radius: 8px;
+    background: var(--pine-tint);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; line-height: 1;
+  }
+
   .card__texto { flex: 1 1 auto; min-width: 0; max-width: 46ch; }
-  .card__titulo { margin: 0; font-size: 13.5px; font-weight: 700; }
-  .card__descricao { margin: 2px 0 0; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
-  .card__requisito { margin: 3px 0 0; font-size: 10.5px; color: var(--accent-soft); }
+  .card__titulo { margin: 0; font-size: 13px; font-weight: 600; }
+  .card__descricao { margin: 2px 0 0; font-size: 11.5px; color: var(--ink-soft); line-height: 1.45; }
+  .card__requisito { margin: 4px 0 0; font-size: 10.5px; color: var(--ink-faint); display: flex; align-items: center; gap: 4px; }
 
   .card__acao {
     flex: 0 0 auto;
-    margin-left: 12px;
-    padding: 7px 14px;
-    background: var(--accent);
+    margin-left: 10px;
+    padding: 8px 16px;
+    background: var(--pine);
     color: #fff;
     font-size: 12.5px;
+    box-shadow: var(--shadow-1);
   }
 
-  .card__acao:hover:not(:disabled) { background: #397f62; }
+  .card__acao:hover:not(:disabled) { background: var(--pine-deep); }
 
-  .execucao { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-  .execucao h2 { margin: 4px 0 0; font-size: 17px; font-weight: 700; color: var(--accent); }
-  .execucao .subtitulo-exec { margin: 2px 0 6px; font-size: 12.5px; color: var(--text-muted); }
-  .execucao .status { margin: 0 0 6px; font-size: 12px; font-weight: 700; color: var(--status-info); min-height: 1.2em; }
+  .execucao { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; margin-top: 2px; }
+
+  .execucao-cabecalho { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .execucao h2 { margin: 6px 0 0; font-size: 15px; font-weight: 600; }
+  .execucao .subtitulo-exec { margin: 2px 0 8px; font-size: 12px; color: var(--ink-soft); }
+
+  .status-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px 3px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600;
+    background: var(--mist-deep); color: var(--ink-soft);
+    border: 1px solid var(--hairline);
+    white-space: nowrap;
+  }
+  .status-chip .ponto { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); }
+  .status-chip[data-estado="executando"] { background: rgba(47,127,214,0.12); color: var(--status-info); border-color: rgba(47,127,214,0.3); }
+  .status-chip[data-estado="executando"] .ponto { background: var(--status-info); animation: pulso 1.1s ease-in-out infinite; }
+  .status-chip[data-estado="sucesso"] { background: rgba(47,158,99,0.12); color: var(--status-success); border-color: rgba(47,158,99,0.3); }
+  .status-chip[data-estado="sucesso"] .ponto { background: var(--status-success); }
+  .status-chip[data-estado="aviso"] { background: rgba(179,128,11,0.12); color: var(--status-warning); border-color: rgba(179,128,11,0.3); }
+  .status-chip[data-estado="aviso"] .ponto { background: var(--status-warning); }
+  .status-chip[data-estado="erro"] { background: rgba(209,69,61,0.12); color: var(--status-error); border-color: rgba(209,69,61,0.3); }
+  .status-chip[data-estado="erro"] .ponto { background: var(--status-error); }
+
+  @keyframes pulso { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
   .console {
     flex: 1 1 auto;
     min-height: 120px;
     background: var(--console-bg);
     color: var(--console-fg);
-    border-radius: 4px;
-    padding: 10px 12px;
-    font-family: "Consolas", "Cascadia Mono", monospace;
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-family: "Cascadia Code", "Consolas", monospace;
     font-size: 12px;
-    line-height: 1.6;
+    line-height: 1.65;
     overflow-y: auto;
     white-space: pre-wrap;
+    box-shadow: var(--shadow-1);
   }
+
+  .console:empty::before { content: "A saída do script aparece aqui."; color: var(--ink-faint); opacity: 0.55; }
 </style>
 </head>
 <body>
 
 <div class="app">
   <div class="coluna coluna--1">
-    <div>
-      <h1>✨ Automação da Conformidade</h1>
-      <p class="subtitulo">Escolha a planilha e um script para executar</p>
+    <div class="cabecalho">
+      <div class="marca-icone">✨</div>
+      <div>
+        <h1>Automação da Conformidade</h1>
+        <p class="subtitulo">Escolha a planilha e um script para executar</p>
+      </div>
     </div>
 
-    <div class="caixa-destaque">
-      <p class="rotulo">Planilha de Controle</p>
+    <div class="painel painel--acento">
+      <p class="rotulo"><span class="ponto"></span>Planilha de Controle</p>
       <div class="linha-controle">
         <select id="planilha-select"></select>
         <button class="btn btn--icone" id="planilha-atualizar" title="Atualizar lista">⟳</button>
@@ -353,20 +432,23 @@ HTML_INTERFACE = r"""
   </div>
 
   <div class="coluna coluna--2">
-    <div class="caixa-destaque">
-      <p class="rotulo">Comando para abrir o Chrome em modo debug (cole no CMD)</p>
+    <div class="painel painel--acento">
+      <p class="rotulo"><span class="ponto"></span>Comando para abrir o Chrome em modo debug</p>
       <div class="linha-controle">
         <input class="campo-comando" id="chrome-comando" readonly>
         <button class="btn btn--outline" id="chrome-copiar">Copiar</button>
       </div>
+      <p class="ajuda">Cole no CMD antes de rodar um script que precisa do Chrome.</p>
     </div>
 
     <div id="coluna2-cards"></div>
 
     <div class="execucao">
-      <h2>Execução do script</h2>
+      <div class="execucao-cabecalho">
+        <h2>Execução do script</h2>
+        <span class="status-chip" id="status-chip" data-estado="ocioso"><span class="ponto"></span><span id="status-texto">Ocioso</span></span>
+      </div>
       <p class="subtitulo-exec">Acompanhe aqui o andamento e as mensagens do script em execução</p>
-      <p class="status" id="status-execucao"></p>
       <div class="console" id="console"></div>
     </div>
   </div>
@@ -398,8 +480,9 @@ HTML_INTERFACE = r"""
     return card;
   }
 
-  function definirStatus(texto) {
-    document.getElementById("status-execucao").textContent = texto;
+  function definirEstado(estado, texto) {
+    document.getElementById("status-chip").dataset.estado = estado;
+    document.getElementById("status-texto").textContent = texto;
   }
 
   function appendOutput(texto) {
@@ -452,7 +535,7 @@ HTML_INTERFACE = r"""
     });
 
     if (resultado.nomes.length) {
-      status.textContent = "Confira se é a certa antes de executar.";
+      status.textContent = "Confira se é a planilha certa antes de executar.";
     } else {
       status.textContent = "Nenhuma planilha encontrada na pasta indicada.";
     }
