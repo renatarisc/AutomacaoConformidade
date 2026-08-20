@@ -19,6 +19,18 @@ import preencher_planilha_ns
 # scripts que se conectam via options.debugger_address - ver comentário no topo de cada main()
 COMANDO_CHROME_DEBUG = r'"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\ChromeSelenium"'
 
+# ícones de cada card em SVG inline (estilo flat/outline, no espírito do Flaticon) em vez de
+# emoji - não usamos ícones hotlinkados do Flaticon de fato porque isso exigiria internet em
+# tempo de execução e atribuição visível na interface; inline evita as duas coisas e funciona
+# offline também. Todos com o mesmo viewBox/traço pra ficarem consistentes lado a lado.
+_SVG_ATRIBUTOS = "viewBox='0 0 24 24' width='20' height='20' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'"
+ICONE_DOCUMENTO = f"<svg {_SVG_ATRIBUTOS}><path d='M7 3h7l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z'/><path d='M14 3v4h4'/><path d='M9 13h6M9 17h6M9 9h2'/></svg>"
+ICONE_DOCUMENTO_BAIXAR = f"<svg {_SVG_ATRIBUTOS}><path d='M7 3h7l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z'/><path d='M14 3v4h4'/><path d='M12 11.5v6'/><path d='m9.5 15 2.5 2.5L14.5 15'/></svg>"
+ICONE_LUPA = f"<svg {_SVG_ATRIBUTOS}><circle cx='11' cy='11' r='6'/><path d='m20 20-3.8-3.8'/></svg>"
+ICONE_ELO = f"<svg {_SVG_ATRIBUTOS}><path d='m10.5 13.5 3-3'/><rect x='2.5' y='12.5' width='8' height='5' rx='2.5' transform='rotate(-45 6.5 15)'/><rect x='13.5' y='6.5' width='8' height='5' rx='2.5' transform='rotate(-45 17.5 9)'/></svg>"
+ICONE_BAIXAR = f"<svg {_SVG_ATRIBUTOS}><path d='M12 4v10'/><path d='m8 10.5 4 4 4-4'/><path d='M4 18h16'/></svg>"
+ICONE_CLIPE = f"<svg {_SVG_ATRIBUTOS}><path d='M8 12.5V7a4 4 0 1 1 8 0v9a2.5 2.5 0 0 1-5 0V8.5'/></svg>"
+
 # só os scripts que rodam sozinhos (fazem algo ao serem executados diretamente) entram no menu;
 # os módulos auxiliares (só definem funções, chamados por esses scripts) ficam de fora.
 # cada um chama main() direto (em vez de abrir um subprocesso) pra funcionar também dentro
@@ -29,7 +41,7 @@ OPCOES = [
         "arquivo": "preencher_planilha_ro.py",
         "modulo": preencher_planilha_ro,
         "coluna": 2,
-        "icone": "📄",
+        "icone": ICONE_DOCUMENTO,
         "titulo": "Preencher Planilha de Controle (RO)",
         "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
         "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
@@ -38,7 +50,7 @@ OPCOES = [
         "arquivo": "preencher_planilha_ns.py",
         "modulo": preencher_planilha_ns,
         "coluna": 1,
-        "icone": "📄",
+        "icone": ICONE_DOCUMENTO,
         "titulo": "Preencher Planilha de Controle (NS)",
         "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
         "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
@@ -47,7 +59,7 @@ OPCOES = [
         "arquivo": "baixar_anexar_ne.py",
         "modulo": baixar_anexar_ne,
         "coluna": 2,
-        "icone": "📥",
+        "icone": ICONE_DOCUMENTO_BAIXAR,
         "titulo": "Baixar e anexar NE e tramitar o processo",
         "descricao": "Baixa do Siafi a NE pintada de Cinza, anexa no processo e tramita.",
         "requisito": "Requer o Chrome já aberto em modo debug e logado no Siafi.",
@@ -56,7 +68,7 @@ OPCOES = [
         "arquivo": "relacionar_valor_op.py",
         "modulo": relacionar_valor_op,
         "coluna": 1,
-        "icone": "🔍",
+        "icone": ICONE_LUPA,
         "titulo": "Relacionar Valor → OP",
         "descricao": "Busca a OP no Siafi pelo valor (ISS/PG), grava na planilha e pinta de Amarelo.",
         "requisito": "Requer o Chrome já aberto em modo debug e logado no Siafi.",
@@ -65,16 +77,16 @@ OPCOES = [
         "arquivo": "relacionar_op_ob.py",
         "modulo": relacionar_op_ob,
         "coluna": 1,
-        "icone": "🔗",
+        "icone": ICONE_ELO,
         "titulo": "Relacionar OP → OB",
-        "descricao": "Busca a OB no Siafi a partir da OP pintada de Cinza e substitui na planilha.",
+        "descricao": "Busca a OB no Siafi a partir da OP pintada de Cinza, substitui na planilha e pinta de Amarelo.",
         "requisito": "Requer o Chrome já aberto em modo debug e logado no Siafi.",
     },
     {
         "arquivo": "baixar_ob.py",
         "modulo": baixar_ob,
         "coluna": 1,
-        "icone": "⬇️",
+        "icone": ICONE_BAIXAR,
         "titulo": "Baixar OB",
         "descricao": "Baixa do Cara Preta o PDF da OB pintada de Amarelo (via pyautogui).",
         "requisito": "Requer o Sistema já aberto e com foco antes de rodar a automação.",
@@ -83,7 +95,7 @@ OPCOES = [
         "arquivo": "anexar_ob.py",
         "modulo": anexar_ob,
         "coluna": 1,
-        "icone": "📎",
+        "icone": ICONE_CLIPE,
         "titulo": "Anexar OB e tramitar o processo",
         "descricao": "Anexa no processo o PDF da OB pintada de amarelo e tramita.",
         "requisito": "Abre e loga no Suap sozinho - não precisa preparar nada antes.",
@@ -343,17 +355,18 @@ HTML_INTERFACE = r"""
     flex: 0 0 auto; width: 36px; height: 36px; border-radius: 8px;
     background: var(--pine-tint);
     display: flex; align-items: center; justify-content: center;
-    font-size: 17px; line-height: 1;
+    color: var(--pine-deep);
   }
 
-  .card__texto { flex: 1 1 auto; min-width: 0; max-width: 46ch; }
+  .card__icone svg { width: 20px; height: 20px; }
+
+  .card__texto { flex: 1 1 auto; min-width: 0; }
   .card__titulo { margin: 0; font-size: 13px; font-weight: 600; }
   .card__descricao { margin: 2px 0 0; font-size: 11.5px; color: var(--ink-soft); line-height: 1.45; }
   .card__requisito { margin: 4px 0 0; font-size: 10.5px; color: var(--ink-faint); display: flex; align-items: center; gap: 4px; }
 
   .card__acao {
     flex: 0 0 auto;
-    margin-left: 10px;
     padding: 8px 16px;
     background: var(--pine);
     color: #fff;
@@ -415,7 +428,7 @@ HTML_INTERFACE = r"""
       <div class="marca-icone">✨</div>
       <div>
         <h1>Automação da Conformidade</h1>
-        <p class="subtitulo">Escolha a planilha e um script para executar</p>
+        <p class="subtitulo">Escolha a planilha e um script para executar.</p>
       </div>
     </div>
 
@@ -438,7 +451,7 @@ HTML_INTERFACE = r"""
         <input class="campo-comando" id="chrome-comando" readonly>
         <button class="btn btn--outline" id="chrome-copiar">Copiar</button>
       </div>
-      <p class="ajuda">Cole no CMD antes de rodar um script que precisa do Chrome.</p>
+      <p class="ajuda">Fecha todos os Chromes abertos e cole no CMD antes de rodar um script.</p>
     </div>
 
     <div id="coluna2-cards"></div>
@@ -448,7 +461,7 @@ HTML_INTERFACE = r"""
         <h2>Execução do script</h2>
         <span class="status-chip" id="status-chip" data-estado="ocioso"><span class="ponto"></span><span id="status-texto">Ocioso</span></span>
       </div>
-      <p class="subtitulo-exec">Acompanhe aqui o andamento e as mensagens do script em execução</p>
+      <p class="subtitulo-exec">Acompanhe aqui o andamento e as mensagens do script em execução.</p>
       <div class="console" id="console"></div>
     </div>
   </div>
