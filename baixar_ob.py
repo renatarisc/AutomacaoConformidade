@@ -87,10 +87,15 @@ def main(nome_planilha=None):
         for info in COLUNAS_OB:
             if not cor_bate(cores.get((linha_planilha, info["coluna"])), AMARELO_CLARO_1):
                 continue
+
+            valor_celula = str(dados.loc[linha, info["nome"]]).strip()
+            if "OB" not in valor_celula: # a mesma cor amarela também marca uma OP ainda pendente de assinatura/conversão em OB - só baixa quem já é OB de fato
+                continue
+
             lista_processo.append({
                 "linha_planilha": linha_planilha,
                 "coluna": info["coluna"],
-                "OB": dados.loc[linha, info["nome"]],
+                "OB": valor_celula,
                 "valor": str(dados.loc[linha, info["nome_valor"]]).strip(),
                 "processo": str(dados.loc[linha, "Processo"]).strip(),
             })

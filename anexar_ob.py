@@ -114,9 +114,10 @@ def main(nome_planilha=None):
         linha_planilha = linha + 2 # linha do DataFrame começa em 0, a planilha em 2 (cabeçalho na linha 1)
 
         obs_pendentes = [
-            {"coluna": info["coluna"], "OB": dados.loc[linha, info["nome"]]}
+            {"coluna": info["coluna"], "OB": str(dados.loc[linha, info["nome"]]).strip()}
             for info in COLUNAS_OB
             if cor_bate(cores.get((linha_planilha, info["coluna"])), AMARELO_CLARO_1)
+            and "OB" in str(dados.loc[linha, info["nome"]]) # a mesma cor amarela também marca uma OP ainda pendente de assinatura/conversão em OB - só anexa quem já é OB de fato
         ]
         if obs_pendentes:
             lista_processo.append({
