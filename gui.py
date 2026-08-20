@@ -1,13 +1,10 @@
 import sys
 import os
+import json
 import threading
-import queue
 import traceback
-import tkinter as tk
-from tkinter.scrolledtext import ScrolledText
 
-import ttkbootstrap as tb
-from ttkbootstrap.constants import *
+import webview # pip install pywebview - abre uma janela nativa renderizando HTML/CSS/JS (WebView2 no Windows)
 
 import escolher_planilha
 import relacionar_valor_op
@@ -22,42 +19,43 @@ import preencher_planilha_ns
 # scripts que se conectam via options.debugger_address - ver comentário no topo de cada main()
 COMANDO_CHROME_DEBUG = r'"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\ChromeSelenium"'
 
-VERDE_EXECUTAR = "#45a37e" # mesmo verde do bootstyle "success" (botão Executar) no tema minty
-VERDE_CLARO_AVISO = "#98ccb8" # VERDE_EXECUTAR clareado (45% em direção ao branco), usado nos avisos ⚠
-CINZA_BORDA_CARTAO = "#d7ddda" # borda fina e clara dos cards de script (em vez do relevo "solid" padrão do ttk)
-
 # só os scripts que rodam sozinhos (fazem algo ao serem executados diretamente) entram no menu;
 # os módulos auxiliares (só definem funções, chamados por esses scripts) ficam de fora.
 # cada um chama main() direto (em vez de abrir um subprocesso) pra funcionar também dentro
-# do executável gerado pelo PyInstaller, onde não existe mais um python.exe separado pra chamar
+# do executável gerado pelo PyInstaller, onde não existe mais um python.exe separado pra chamar.
+# "coluna": em qual coluna da interface o card aparece (1 ou 2)
 OPCOES = [
     {
         "arquivo": "preencher_planilha_ro.py",
         "modulo": preencher_planilha_ro,
+        "coluna": 2,
         "icone": "📄",
         "titulo": "Preencher Planilha de Controle (RO)",
-        "descricao": "Lê as abas do Chrome com os Processo abertos em PDF e preenche a Planilha",
+        "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
         "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
     },
     {
         "arquivo": "preencher_planilha_ns.py",
         "modulo": preencher_planilha_ns,
+        "coluna": 1,
         "icone": "📄",
         "titulo": "Preencher Planilha de Controle (NS)",
-        "descricao": "Lê as abas do Chrome com os Processo abertos em PDF e preenche a Planilha",
+        "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
         "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
     },
     {
         "arquivo": "baixar_anexar_ne.py",
         "modulo": baixar_anexar_ne,
+        "coluna": 2,
         "icone": "📥",
-        "titulo": "Baixar e anexar NE e tramitar o processo.",
+        "titulo": "Baixar e anexar NE e tramitar o processo",
         "descricao": "Baixa do Siafi a NE pintada de Cinza, anexa no processo e tramita.",
         "requisito": "Requer o Chrome já aberto em modo debug e logado no Siafi.",
     },
     {
         "arquivo": "relacionar_valor_op.py",
         "modulo": relacionar_valor_op,
+        "coluna": 1,
         "icone": "🔍",
         "titulo": "Relacionar Valor → OP",
         "descricao": "Busca a OP no Siafi pelo valor (ISS/PG), grava na planilha e pinta de Amarelo.",
@@ -66,6 +64,7 @@ OPCOES = [
     {
         "arquivo": "relacionar_op_ob.py",
         "modulo": relacionar_op_ob,
+        "coluna": 1,
         "icone": "🔗",
         "titulo": "Relacionar OP → OB",
         "descricao": "Busca a OB no Siafi a partir da OP pintada de Cinza e substitui na planilha.",
@@ -74,6 +73,7 @@ OPCOES = [
     {
         "arquivo": "baixar_ob.py",
         "modulo": baixar_ob,
+        "coluna": 1,
         "icone": "⬇️",
         "titulo": "Baixar OB",
         "descricao": "Baixa do Cara Preta o PDF da OB pintada de Amarelo (via pyautogui).",
@@ -82,6 +82,7 @@ OPCOES = [
     {
         "arquivo": "anexar_ob.py",
         "modulo": anexar_ob,
+        "coluna": 1,
         "icone": "📎",
         "titulo": "Anexar OB e tramitar o processo",
         "descricao": "Anexa no processo o PDF da OB pintada de amarelo e tramita.",
@@ -89,238 +90,72 @@ OPCOES = [
     },
 ]
 
-class EscritorFila:
-    # arquivo "falso" que faz print() dentro dos scripts cair na fila em vez do console
-    def __init__(self, fila):
-        self.fila = fila
+OPCOES_POR_ARQUIVO = {opcao["arquivo"]: opcao for opcao in OPCOES}
+
+class EscritorJS:
+    # arquivo "falso" que faz print() dentro dos scripts virar uma chamada JS, aparecendo ao vivo no console da página
+    def __init__(self, window):
+        self.window = window
 
     def write(self, texto):
         if texto:
-            self.fila.put(("linha", texto))
+            self.window.evaluate_js(f"appendOutput({json.dumps(texto)})")
 
     def flush(self):
         pass
 
-class App(tb.Window):
+class Api:
+    # ponte Python <-> JS (window.pywebview.api.<metodo> no lado JS) - cada método aqui vira uma função
+    # assíncrona chamável a partir da página. O atributo "window" é preenchido depois de criar a janela
+    # (não dá pra referenciar a janela dentro dela mesma antes dela existir)
     def __init__(self):
-        super().__init__(title="Automação da Conformidade", themename="minty", size=(1200, 660))
-        self.minsize(1150, 520)
-        self.place_window_center() # posição/tamanho de restauração, caso o usuário desmaximize depois
-        self.state("zoomed") # abre já maximizada
-
-        icone = os.path.join(os.path.dirname(__file__), "icon.ico")
-        if os.path.exists(icone):
-            self.iconbitmap(icone)
-
-        self.fila_saida = queue.Queue()
-        self.fila_planilhas = queue.Queue()
+        self.window = None
         self.executando = False
-        self.botoes = []
 
-        # duas colunas de MESMA largura lado a lado, em vez de tudo empilhado numa coluna só (era preciso
-        # rolagem quando os 6 scripts + planilha + comando do Chrome ficavam todos ali). Usa grid (não pack)
-        # no nível da janela com as duas colunas no mesmo grupo "uniform" - é o jeito confiável de garantir
-        # largura igual entre elas independente do conteúdo de cada uma, e elas dividem toda a largura da
-        # janela (sticky="nsew"), sem sobrar vão em branco.
-        # Coluna 1, de cima pra baixo: título, planilha de controle, cards "Preencher Planilha (NS)",
-        # "Relacionar Valor → OP", "Relacionar OP → OB", "Baixar OB", "Anexar OB".
-        # Coluna 2, de cima pra baixo: comando do Chrome, cards "Preencher Planilha (RO)" e "Baixar e anexar
-        # NE", e a saída da execução esticando embaixo (não foi mencionada no pedido - mantida aqui por ser
-        # a coluna mais curta; me avisa se quiser em outro lugar)
-        opcoes_por_arquivo = {opcao["arquivo"]: opcao for opcao in OPCOES}
-        opcoes_coluna1 = [
-            opcoes_por_arquivo["preencher_planilha_ns.py"],
-            opcoes_por_arquivo["relacionar_valor_op.py"],
-            opcoes_por_arquivo["relacionar_op_ob.py"],
-            opcoes_por_arquivo["baixar_ob.py"],
-            opcoes_por_arquivo["anexar_ob.py"],
+    def obter_opcoes(self):
+        # não dá pra mandar "modulo" (objeto Python) pro JS - só os dados exibidos na tela
+        return [
+            {chave: valor for chave, valor in opcao.items() if chave != "modulo"}
+            for opcao in OPCOES
         ]
-        opcoes_coluna2 = [opcoes_por_arquivo["preencher_planilha_ro.py"], opcoes_por_arquivo["baixar_anexar_ne.py"]]
 
-        self.columnconfigure(0, weight=1, uniform="colunas")
-        self.columnconfigure(1, weight=1, uniform="colunas")
-        self.rowconfigure(0, weight=1)
+    def obter_comando_chrome(self):
+        return COMANDO_CHROME_DEBUG
 
-        painel_coluna1 = tb.Frame(self)
-        painel_coluna1.grid(row=0, column=0, sticky="nsew")
-        painel_coluna1.grid_propagate(False)
-
-        painel_coluna2 = tb.Frame(self)
-        painel_coluna2.grid(row=0, column=1, sticky="nsew")
-        painel_coluna2.grid_propagate(False)
-
-        tb.Label(painel_coluna1, text="✨ Automação da Conformidade", font=("Segoe UI", 18, "bold"), foreground=VERDE_EXECUTAR).pack(anchor="w", padx=20, pady=(12, 0))
-        tb.Label(painel_coluna1, text="Escolha a planilha e um script para executar", font=("Segoe UI", 10), foreground=VERDE_CLARO_AVISO).pack(anchor="w", padx=20, pady=(0, 4))
-
-        self._montar_seletor_planilha(painel_coluna1)
-        self._montar_menu(painel_coluna1, opcoes_coluna1)
-
-        self._montar_chrome_debug(painel_coluna2)
-        self._montar_menu(painel_coluna2, opcoes_coluna2) # Preencher Planilha (RO) e Baixar e anexar NE
-        self._montar_saida(painel_coluna2) # último - estica e preenche o resto da coluna
-
-    def _montar_seletor_planilha(self, pai):
+    def listar_planilhas(self):
         # a Planilha de Controle muda todo mês, sem data certa - em vez de editar o nome fixo em
         # cada script, lista as planilhas da pasta do Drive (escolher_planilha.PASTA_DRIVE_ID) e
-        # deixa o usuário escolher aqui qual vale para todos os scripts executados a seguir.
-        # contorno verde (mesmo tom do botão Executar) pra diferenciar visualmente dos cards dos
-        # scripts - usa tk.Frame puro (não o tb.Frame temático) porque só assim dá pra colorir a
-        # borda numa cor exata via highlightbackground
-        quadro_borda = tk.Frame(pai, highlightbackground=VERDE_EXECUTAR, highlightcolor=VERDE_EXECUTAR, highlightthickness=2, bd=0)
-        quadro_borda.pack(fill="x", padx=20, pady=(12, 3))
-
-        quadro = tb.Frame(quadro_borda, padding=8)
-        quadro.pack(fill="both", expand=True)
-        quadro.columnconfigure(0, weight=1)
-
-        tb.Label(quadro, text="Planilha de Controle", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
-
-        self.planilha_var = tb.StringVar(value="")
-        self.combo_planilha = tb.Combobox(quadro, textvariable=self.planilha_var, state="readonly", font=("Segoe UI", 9))
-        self.combo_planilha.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-
-        self.botao_atualizar_planilhas = tb.Button(quadro, text="🔄", bootstyle="secondary-outline", width=3, command=self._atualizar_planilhas)
-        self.botao_atualizar_planilhas.grid(row=1, column=1, sticky="e", padx=(6, 0), pady=(4, 0))
-
-        self.status_planilha_var = tb.StringVar(value="")
-        tb.Label(quadro, textvariable=self.status_planilha_var, font=("Segoe UI", 8), bootstyle=SECONDARY, wraplength=380, justify="left").grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
-
-        self._atualizar_planilhas() # já carrega a lista ao abrir o app
-
-    def _atualizar_planilhas(self):
-        self.combo_planilha.configure(state="disabled")
-        self.botao_atualizar_planilhas.configure(state="disabled")
-
-        thread = threading.Thread(target=self._carregar_planilhas, daemon=True)
-        thread.start()
-        self.after(100, self._checar_fila_planilhas)
-
-    def _carregar_planilhas(self):
-        # roda numa thread separada pra não travar a janela enquanto espera a API do Drive
+        # deixa o usuário escolher aqui qual vale para todos os scripts executados a seguir
         try:
             arquivos = escolher_planilha.listar()
-            self.fila_planilhas.put(([arquivo["name"] for arquivo in arquivos], None))
+            return {"nomes": [arquivo["name"] for arquivo in arquivos], "erro": None}
         except Exception as e:
-            self.fila_planilhas.put(([], str(e)))
+            return {"nomes": [], "erro": str(e)}
 
-    def _checar_fila_planilhas(self):
-        try:
-            nomes, erro = self.fila_planilhas.get_nowait()
-        except queue.Empty:
-            self.after(100, self._checar_fila_planilhas)
-            return
-
-        self.combo_planilha.configure(state="readonly")
-        self.botao_atualizar_planilhas.configure(state="normal")
-
-        if erro:
-            self.status_planilha_var.set(f"❌ Erro ao listar planilhas: {erro}")
-            return
-
-        self.combo_planilha.configure(values=nomes)
-        if nomes:
-            self.planilha_var.set(nomes[0]) # lista já vem da mais recente pra mais antiga
-            self.status_planilha_var.set("Confira se é a certa antes de executar.")
-        else:
-            self.status_planilha_var.set("Nenhuma planilha encontrada na pasta indicada.")
-
-    def _montar_menu(self, pai, opcoes):
-        for opcao in opcoes:
-            # tk.Frame com highlightbackground (não o relevo "solid" padrão do ttk) pra ter uma borda fina e
-            # clara, igual à das caixas de Planilha de Controle/Comando do Chrome, só que mais sutil (1px)
-            quadro_borda = tk.Frame(pai, highlightbackground=CINZA_BORDA_CARTAO, highlightthickness=1, bd=0)
-            quadro_borda.pack(fill="x", padx=20, pady=3)
-
-            quadro = tb.Frame(quadro_borda, padding=8)
-            quadro.pack(fill="both", expand=True)
-            # minsize fixo: cada card tem sua própria grade, e emojis diferentes (ex: 📎, 18px)
-            # renderizam mais estreitos que os outros (🔍🔗⬇️📥, 37px cada, medido com Font.measure)
-            # na fonte - sem isso, a coluna do ícone varia de card pra card e o texto não começa
-            # alinhado entre eles. 56 > 37+12(padx) garante que o piso vale pra todos igualmente
-            quadro.columnconfigure(0, minsize=56)
-            # sem weight na coluna do texto: ela não estica pra ocupar o card inteiro, então o botão fica
-            # logo depois do texto em vez de grudado na borda direita (o card agora é bem mais largo, já
-            # que as duas colunas da janela dividem toda a largura dela)
-
-            tb.Label(quadro, text=opcao["icone"], font=("Segoe UI Emoji", 20)).grid(row=0, column=0, rowspan=3, padx=(0, 12), sticky="n")
-
-            tb.Label(quadro, text=opcao["titulo"], font=("Segoe UI", 10, "bold"), wraplength=380, justify="left").grid(row=0, column=1, sticky="w")
-            tb.Label(quadro, text=opcao["descricao"], font=("Segoe UI", 9), bootstyle=SECONDARY, wraplength=380, justify="left").grid(row=1, column=1, sticky="w", pady=(1, 0))
-            tb.Label(quadro, text=f"⚠ {opcao['requisito']}", font=("Segoe UI", 8), foreground=VERDE_CLARO_AVISO, wraplength=380, justify="left").grid(row=2, column=1, sticky="w", pady=(1, 0))
-
-            botao = tb.Button(quadro, text="Executar ▶", bootstyle="success", width=10, command=lambda o=opcao: self.executar(o))
-            botao.grid(row=0, column=2, rowspan=3, sticky="n", padx=(12, 0))
-            self.botoes.append(botao)
-
-    def _montar_chrome_debug(self, pai):
-        # os scripts "requer Chrome em modo debug" (ver OPCOES) precisam desse comando rodado
-        # no CMD antes - fica aqui pra copiar com um clique, sem precisar abrir o PyCharm.
-        # mesmo contorno verde do card da Planilha de Controle, pra sinalizar que também vale
-        # para todos os scripts (não é um card de script específico)
-        quadro_borda = tk.Frame(pai, highlightbackground=VERDE_EXECUTAR, highlightcolor=VERDE_EXECUTAR, highlightthickness=2, bd=0)
-        quadro_borda.pack(fill="x", padx=20, pady=3)
-
-        quadro = tb.Frame(quadro_borda, padding=8)
-        quadro.pack(fill="both", expand=True)
-        quadro.columnconfigure(0, weight=1)
-
-        tb.Label(quadro, text="Comando para abrir o Chrome em modo debug (cole no CMD)", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
-        campo = tb.Entry(quadro, font=("Consolas", 9))
-        campo.insert(0, COMANDO_CHROME_DEBUG)
-        campo.configure(state="readonly")
-        campo.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-
-        tb.Button(quadro, text="Copiar", bootstyle="secondary-outline", width=13, command=self._copiar_comando_chrome).grid(row=1, column=1, sticky="e", padx=(14, 0), pady=(4, 0))
-
-    def _copiar_comando_chrome(self):
-        self.clipboard_clear()
-        self.clipboard_append(COMANDO_CHROME_DEBUG)
-
-    def _montar_saida(self, pai):
-        tb.Label(pai, text="Execução do script", font=("Segoe UI", 16, "bold"), foreground=VERDE_EXECUTAR).pack(anchor="w", padx=(12, 20), pady=(12, 0))
-        tb.Label(pai, text="Acompanhe aqui o andamento e as mensagens do script em execução", font=("Segoe UI", 10), bootstyle=SECONDARY).pack(anchor="w", padx=(12, 20), pady=(0, 4))
-
-        self.status_var = tb.StringVar(value="")
-        tb.Label(pai, textvariable=self.status_var, font=("Segoe UI", 9, "bold"), bootstyle=INFO).pack(anchor="w", padx=(12, 20), pady=(6, 0))
-
-        self.saida_texto = ScrolledText(
-            pai, font=("Consolas", 9),
-            background="#1e1e1e", foreground="#e6e6e6", insertbackground="#e6e6e6",
-            borderwidth=0, highlightthickness=0,
-        )
-        self.saida_texto.pack(fill="both", expand=True, padx=(12, 20), pady=(4, 12))
-        self.saida_texto.configure(state="disabled")
-
-    def executar(self, opcao):
+    def executar(self, arquivo, nome_planilha):
         if self.executando:
             return # já tem algo rodando
 
-        nome_planilha = self.planilha_var.get()
         if not nome_planilha:
-            self.status_var.set("⚠ Escolha a Planilha de Controle antes de executar.")
+            self.window.evaluate_js(f"definirStatus({json.dumps('⚠ Escolha a Planilha de Controle antes de executar.')})")
+            return
+
+        opcao = OPCOES_POR_ARQUIVO.get(arquivo)
+        if opcao is None:
             return
 
         self.executando = True
-        for botao in self.botoes:
-            botao.configure(state="disabled")
+        self.window.evaluate_js(f"definirStatus({json.dumps(f'⏳ Executando {arquivo} (planilha: {nome_planilha})...')})")
+        self.window.evaluate_js("definirExecutando(true)")
 
-        self.status_var.set(f"⏳ Executando {opcao['arquivo']} (planilha: {nome_planilha})...")
-        self._limpar_saida()
-
-        thread = threading.Thread(target=self._rodar_main, args=(opcao, nome_planilha), daemon=True)
+        thread = threading.Thread(target=self._rodar, args=(opcao, nome_planilha), daemon=True)
         thread.start()
-        self.after(100, self._checar_fila)
 
-    def _limpar_saida(self):
-        self.saida_texto.configure(state="normal")
-        self.saida_texto.delete("1.0", "end")
-        self.saida_texto.configure(state="disabled")
-
-    def _rodar_main(self, opcao, nome_planilha):
+    def _rodar(self, opcao, nome_planilha):
         # troca a saída padrão só durante a chamada, pra capturar os print()s do script
-        # e mostrar ao vivo na caixa de texto, igual acontecia com o subprocess antes
+        # e mostrar ao vivo no console da página
         saida_original, erro_original = sys.stdout, sys.stderr
-        escritor = EscritorFila(self.fila_saida)
+        escritor = EscritorJS(self.window)
         sys.stdout = escritor
         sys.stderr = escritor
         codigo_retorno = 0
@@ -328,44 +163,343 @@ class App(tb.Window):
         try:
             opcao["modulo"].main(nome_planilha)
         except SystemExit as e:
-            # algum script chama sys.exit() no próprio fluxo de erro (ex: baixar_anexar_ne.py);
-            # sem isso aqui, isso encerraria a janela inteira em vez de só marcar erro
+            # algum script chama sys.exit() no próprio fluxo de erro (ex: baixar_anexar_ne.py)
             codigo_retorno = e.code if isinstance(e.code, int) else 1
         except Exception:
-            traceback.print_exc() # cai no escritor (stderr redirecionado), aparece na caixa de saída
+            traceback.print_exc() # cai no escritor (stderr redirecionado), aparece no console da página
             codigo_retorno = 1
         finally:
             sys.stdout, sys.stderr = saida_original, erro_original
 
-        self.fila_saida.put(("fim", codigo_retorno))
-
-    def _checar_fila(self):
-        try:
-            while True:
-                tipo, valor = self.fila_saida.get_nowait()
-                if tipo == "linha":
-                    self.saida_texto.configure(state="normal")
-                    self.saida_texto.insert("end", valor)
-                    self.saida_texto.see("end")
-                    self.saida_texto.configure(state="disabled")
-                elif tipo == "fim":
-                    self._finalizar(valor)
-                    return # terminou, não reagenda
-        except queue.Empty:
-            pass
-
-        self.after(100, self._checar_fila)
-
-    def _finalizar(self, codigo_retorno):
         self.executando = False
-        for botao in self.botoes:
-            botao.configure(state="normal")
-
         if codigo_retorno == 0:
-            self.status_var.set("✅ Concluído.")
+            self.window.evaluate_js(f"definirStatus({json.dumps('✅ Concluído.')})")
         else:
-            self.status_var.set(f"❌ Terminou com erro (código {codigo_retorno}).")
+            self.window.evaluate_js(f"definirStatus({json.dumps(f'❌ Terminou com erro (código {codigo_retorno}).')})")
+        self.window.evaluate_js("definirExecutando(false)")
 
+HTML_INTERFACE = r"""
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<title>Automação da Conformidade</title>
+<style>
+  :root {
+    --bg: #eef1f0;
+    --surface: #ffffff;
+    --border: #d7ddda;
+    --accent: #45a37e;
+    --accent-soft: #7fb89e;
+    --text: #23292c;
+    --text-muted: #667077;
+    --console-bg: #1e1e1e;
+    --console-fg: #e6e6e6;
+    --status-info: #2f8fd6;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Segoe UI Variable", system-ui, sans-serif;
+    font-size: 14px;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    height: 100vh;
+  }
+
+  .coluna {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 18px 22px;
+    min-width: 0;
+    overflow-y: auto;
+  }
+
+  .coluna--2 { border-left: 1px solid var(--border); }
+
+  h1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: -0.01em;
+  }
+
+  .subtitulo { margin: 2px 0 4px; color: var(--accent-soft); font-size: 13px; }
+
+  .caixa-destaque {
+    border: 2px solid var(--accent);
+    border-radius: 6px;
+    background: var(--surface);
+    padding: 10px 12px;
+    flex: 0 0 auto;
+  }
+
+  .caixa-destaque .rotulo { font-weight: 700; font-size: 12.5px; margin: 0 0 6px; }
+
+  .linha-controle { display: flex; gap: 8px; }
+
+  select, input.campo-comando {
+    flex: 1;
+    min-width: 0;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+  }
+
+  input.campo-comando { font-family: "Consolas", "Cascadia Mono", monospace; font-size: 12px; color: var(--text-muted); }
+
+  .btn {
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  .btn--icone { padding: 6px 10px; background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
+  .btn--outline { padding: 6px 14px; background: transparent; border: 1px solid var(--accent); color: var(--accent); }
+  .btn--outline:hover { background: rgba(69, 163, 126, 0.1); }
+
+  .ajuda { margin: 6px 0 0; font-size: 11.5px; color: var(--text-muted); }
+
+  .card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    padding: 10px 14px;
+    flex: 0 0 auto;
+  }
+
+  .card__icone { flex: 0 0 auto; width: 34px; text-align: center; font-size: 20px; line-height: 1; }
+  .card__texto { flex: 1 1 auto; min-width: 0; max-width: 46ch; }
+  .card__titulo { margin: 0; font-size: 13.5px; font-weight: 700; }
+  .card__descricao { margin: 2px 0 0; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+  .card__requisito { margin: 3px 0 0; font-size: 10.5px; color: var(--accent-soft); }
+
+  .card__acao {
+    flex: 0 0 auto;
+    margin-left: 12px;
+    padding: 7px 14px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 12.5px;
+  }
+
+  .card__acao:hover:not(:disabled) { background: #397f62; }
+
+  .execucao { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  .execucao h2 { margin: 4px 0 0; font-size: 17px; font-weight: 700; color: var(--accent); }
+  .execucao .subtitulo-exec { margin: 2px 0 6px; font-size: 12.5px; color: var(--text-muted); }
+  .execucao .status { margin: 0 0 6px; font-size: 12px; font-weight: 700; color: var(--status-info); min-height: 1.2em; }
+
+  .console {
+    flex: 1 1 auto;
+    min-height: 120px;
+    background: var(--console-bg);
+    color: var(--console-fg);
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-family: "Consolas", "Cascadia Mono", monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <div class="coluna coluna--1">
+    <div>
+      <h1>✨ Automação da Conformidade</h1>
+      <p class="subtitulo">Escolha a planilha e um script para executar</p>
+    </div>
+
+    <div class="caixa-destaque">
+      <p class="rotulo">Planilha de Controle</p>
+      <div class="linha-controle">
+        <select id="planilha-select"></select>
+        <button class="btn btn--icone" id="planilha-atualizar" title="Atualizar lista">⟳</button>
+      </div>
+      <p class="ajuda" id="planilha-status"></p>
+    </div>
+
+    <div id="coluna1-cards"></div>
+  </div>
+
+  <div class="coluna coluna--2">
+    <div class="caixa-destaque">
+      <p class="rotulo">Comando para abrir o Chrome em modo debug (cole no CMD)</p>
+      <div class="linha-controle">
+        <input class="campo-comando" id="chrome-comando" readonly>
+        <button class="btn btn--outline" id="chrome-copiar">Copiar</button>
+      </div>
+    </div>
+
+    <div id="coluna2-cards"></div>
+
+    <div class="execucao">
+      <h2>Execução do script</h2>
+      <p class="subtitulo-exec">Acompanhe aqui o andamento e as mensagens do script em execução</p>
+      <p class="status" id="status-execucao"></p>
+      <div class="console" id="console"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  let planilhaEscolhida = "";
+
+  function montarCard(opcao) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card__icone">${opcao.icone}</div>
+      <div class="card__texto">
+        <p class="card__titulo"></p>
+        <p class="card__descricao"></p>
+        <p class="card__requisito"></p>
+      </div>
+      <button class="btn card__acao">Executar ▶</button>
+    `;
+    card.querySelector(".card__titulo").textContent = opcao.titulo;
+    card.querySelector(".card__descricao").textContent = opcao.descricao;
+    card.querySelector(".card__requisito").textContent = "⚠ " + opcao.requisito;
+
+    const botao = card.querySelector(".card__acao");
+    botao.dataset.arquivo = opcao.arquivo;
+    botao.addEventListener("click", () => executarScript(opcao.arquivo));
+
+    return card;
+  }
+
+  function definirStatus(texto) {
+    document.getElementById("status-execucao").textContent = texto;
+  }
+
+  function appendOutput(texto) {
+    const console_ = document.getElementById("console");
+    console_.textContent += texto;
+    console_.scrollTop = console_.scrollHeight;
+  }
+
+  function definirExecutando(executando) {
+    document.querySelectorAll(".card__acao").forEach((botao) => { botao.disabled = executando; });
+  }
+
+  async function executarScript(arquivo) {
+    planilhaEscolhida = document.getElementById("planilha-select").value;
+    document.getElementById("console").textContent = "";
+    await window.pywebview.api.executar(arquivo, planilhaEscolhida);
+  }
+
+  async function copiarComandoChrome() {
+    const texto = document.getElementById("chrome-comando").value;
+    try {
+      await navigator.clipboard.writeText(texto);
+    } catch (e) {
+      // navegadores/engines mais antigos não têm Clipboard API - alternativa via seleção + execCommand
+      const campo = document.getElementById("chrome-comando");
+      campo.removeAttribute("readonly");
+      campo.select();
+      document.execCommand("copy");
+      campo.setAttribute("readonly", "true");
+    }
+  }
+
+  async function carregarPlanilhas() {
+    const status = document.getElementById("planilha-status");
+    const select = document.getElementById("planilha-select");
+    status.textContent = "⏳ Carregando planilhas da pasta do Drive...";
+
+    const resultado = await window.pywebview.api.listar_planilhas();
+    if (resultado.erro) {
+      status.textContent = "❌ Erro ao listar planilhas: " + resultado.erro;
+      return;
+    }
+
+    select.innerHTML = "";
+    resultado.nomes.forEach((nome) => {
+      const item = document.createElement("option");
+      item.value = nome;
+      item.textContent = nome;
+      select.appendChild(item);
+    });
+
+    if (resultado.nomes.length) {
+      status.textContent = "Confira se é a certa antes de executar.";
+    } else {
+      status.textContent = "Nenhuma planilha encontrada na pasta indicada.";
+    }
+  }
+
+  async function iniciar() {
+    document.getElementById("chrome-comando").value = await window.pywebview.api.obter_comando_chrome();
+    document.getElementById("chrome-copiar").addEventListener("click", copiarComandoChrome);
+    document.getElementById("planilha-atualizar").addEventListener("click", carregarPlanilhas);
+
+    const opcoes = await window.pywebview.api.obter_opcoes();
+    const coluna1 = document.getElementById("coluna1-cards");
+    const coluna2 = document.getElementById("coluna2-cards");
+    opcoes.forEach((opcao) => {
+      const alvo = opcao.coluna === 1 ? coluna1 : coluna2;
+      alvo.appendChild(montarCard(opcao));
+    });
+
+    await carregarPlanilhas();
+  }
+
+  window.addEventListener("pywebviewready", iniciar);
+</script>
+</body>
+</html>
+"""
 
 if __name__ == "__main__":
-    App().mainloop()
+    api = Api()
+    window = webview.create_window(
+        "Automação da Conformidade",
+        html=HTML_INTERFACE,
+        js_api=api,
+        width=1400,
+        height=860,
+        min_size=(1150, 520),
+        maximized=True,
+        text_select=True, # sem isso não dá pra selecionar/copiar texto na página (ex: o traceback no console) - False é o padrão do pywebview
+    )
+    # NÃO atribui api.window = window aqui direto - fazer isso antes da página carregar é a causa
+    # confirmada do erro "[pywebview] Error while processing window.native..." (travamento por acesso
+    # cross-thread ao COM do WebView2 antes de pronto - https://github.com/r0x0r/pywebview/issues/1815).
+    # Só atribui quando o evento "loaded" da janela dispara, depois que o WebView2 já está pronto.
+    def _ao_carregar():
+        api.window = window
+
+    window.events.loaded += _ao_carregar
+
+    icone = os.path.join(os.path.dirname(__file__), "icon.ico") # webview.start() (não create_window) que recebe o ícone
+    webview.start(icon=icone if os.path.exists(icone) else None)
