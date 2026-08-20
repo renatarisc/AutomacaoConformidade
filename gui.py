@@ -15,6 +15,8 @@ import relacionar_op_ob
 import baixar_ob
 import anexar_ob
 import baixar_anexar_ne
+import preencher_planilha_ro
+import preencher_planilha_ns
 
 # comando que abre o Chrome em modo de depuração remota (porta 9222), exigido pelos
 # scripts que se conectam via options.debugger_address - ver comentário no topo de cada main()
@@ -22,12 +24,37 @@ COMANDO_CHROME_DEBUG = r'"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 VERDE_EXECUTAR = "#45a37e" # mesmo verde do bootstyle "success" (botão Executar) no tema minty
 VERDE_CLARO_AVISO = "#98ccb8" # VERDE_EXECUTAR clareado (45% em direção ao branco), usado nos avisos ⚠
+CINZA_BORDA_CARTAO = "#d7ddda" # borda fina e clara dos cards de script (em vez do relevo "solid" padrão do ttk)
 
 # só os scripts que rodam sozinhos (fazem algo ao serem executados diretamente) entram no menu;
 # os módulos auxiliares (só definem funções, chamados por esses scripts) ficam de fora.
 # cada um chama main() direto (em vez de abrir um subprocesso) pra funcionar também dentro
 # do executável gerado pelo PyInstaller, onde não existe mais um python.exe separado pra chamar
 OPCOES = [
+    {
+        "arquivo": "preencher_planilha_ro.py",
+        "modulo": preencher_planilha_ro,
+        "icone": "📄",
+        "titulo": "Preencher Planilha de Controle (RO)",
+        "descricao": "Lê as abas do Chrome com os Processo abertos em PDF e preenche a Planilha",
+        "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
+    },
+    {
+        "arquivo": "preencher_planilha_ns.py",
+        "modulo": preencher_planilha_ns,
+        "icone": "📄",
+        "titulo": "Preencher Planilha de Controle (NS)",
+        "descricao": "Lê as abas do Chrome com os Processo abertos em PDF e preenche a Planilha",
+        "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
+    },
+    {
+        "arquivo": "baixar_anexar_ne.py",
+        "modulo": baixar_anexar_ne,
+        "icone": "📥",
+        "titulo": "Baixar e anexar NE e tramitar o processo.",
+        "descricao": "Baixa do Siafi a NE pintada de Cinza, anexa no processo e tramita.",
+        "requisito": "Requer o Chrome já aberto em modo debug e logado no Siafi.",
+    },
     {
         "arquivo": "relacionar_valor_op.py",
         "modulo": relacionar_valor_op,
@@ -60,14 +87,6 @@ OPCOES = [
         "descricao": "Anexa no processo o PDF da OB pintada de amarelo e tramita.",
         "requisito": "Abre e loga no Suap sozinho - não precisa preparar nada antes.",
     },
-    {
-        "arquivo": "baixar_anexar_ne.py",
-        "modulo": baixar_anexar_ne,
-        "icone": "📥",
-        "titulo": "Baixar e anexar NE e tramitar o processo.",
-        "descricao": "Baixa do Siafi a NE pintada de Cinza, anexa no processo e tramita.",
-        "requisito": "Requer o Chrome já aberto em modo debug e logado no Siafi.",
-    },
 ]
 
 class EscritorFila:
@@ -98,36 +117,47 @@ class App(tb.Window):
         self.executando = False
         self.botoes = []
 
-        # menu à esquerda (não ocupa toda a largura) e a saída da automação à direita,
-        # lado a lado, em vez de empilhados - aproveita melhor o espaço horizontal da janela.
-        # a esquerda fica num canvas com scroll porque o conteúdo (planilha + 5 cards + chrome debug)
-        # é mais alto do que a janela permite mostrar de uma vez só
-        canvas_esquerdo = tb.Canvas(self, highlightthickness=0, width=680) # icone(~68) + texto (wraplength 460) + botão (~100) + paddings
-        canvas_esquerdo.pack(side="left", fill="y")
+        # duas colunas de MESMA largura lado a lado, em vez de tudo empilhado numa coluna só (era preciso
+        # rolagem quando os 6 scripts + planilha + comando do Chrome ficavam todos ali). Usa grid (não pack)
+        # no nível da janela com as duas colunas no mesmo grupo "uniform" - é o jeito confiável de garantir
+        # largura igual entre elas independente do conteúdo de cada uma, e elas dividem toda a largura da
+        # janela (sticky="nsew"), sem sobrar vão em branco.
+        # Coluna 1, de cima pra baixo: título, planilha de controle, cards "Preencher Planilha (NS)",
+        # "Relacionar Valor → OP", "Relacionar OP → OB", "Baixar OB", "Anexar OB".
+        # Coluna 2, de cima pra baixo: comando do Chrome, cards "Preencher Planilha (RO)" e "Baixar e anexar
+        # NE", e a saída da execução esticando embaixo (não foi mencionada no pedido - mantida aqui por ser
+        # a coluna mais curta; me avisa se quiser em outro lugar)
+        opcoes_por_arquivo = {opcao["arquivo"]: opcao for opcao in OPCOES}
+        opcoes_coluna1 = [
+            opcoes_por_arquivo["preencher_planilha_ns.py"],
+            opcoes_por_arquivo["relacionar_valor_op.py"],
+            opcoes_por_arquivo["relacionar_op_ob.py"],
+            opcoes_por_arquivo["baixar_ob.py"],
+            opcoes_por_arquivo["anexar_ob.py"],
+        ]
+        opcoes_coluna2 = [opcoes_por_arquivo["preencher_planilha_ro.py"], opcoes_por_arquivo["baixar_anexar_ne.py"]]
 
-        scrollbar_esquerda = tb.Scrollbar(self, orient="vertical", command=canvas_esquerdo.yview)
-        scrollbar_esquerda.pack(side="left", fill="y")
-        canvas_esquerdo.configure(yscrollcommand=scrollbar_esquerda.set)
+        self.columnconfigure(0, weight=1, uniform="colunas")
+        self.columnconfigure(1, weight=1, uniform="colunas")
+        self.rowconfigure(0, weight=1)
 
-        painel_esquerdo = tb.Frame(canvas_esquerdo)
-        janela_id = canvas_esquerdo.create_window((0, 0), window=painel_esquerdo, anchor="nw")
-        painel_esquerdo.bind("<Configure>", lambda e: canvas_esquerdo.configure(scrollregion=canvas_esquerdo.bbox("all")))
-        canvas_esquerdo.bind("<Configure>", lambda e: canvas_esquerdo.itemconfigure(janela_id, width=e.width))
+        painel_coluna1 = tb.Frame(self)
+        painel_coluna1.grid(row=0, column=0, sticky="nsew")
+        painel_coluna1.grid_propagate(False)
 
-        # roda do mouse funciona sobre a coluna esquerda mesmo sem o cursor estar em cima da scrollbar
-        canvas_esquerdo.bind("<Enter>", lambda e: canvas_esquerdo.bind_all("<MouseWheel>", lambda ev: canvas_esquerdo.yview_scroll(-1 * (ev.delta // 120), "units")))
-        canvas_esquerdo.bind("<Leave>", lambda e: canvas_esquerdo.unbind_all("<MouseWheel>"))
+        painel_coluna2 = tb.Frame(self)
+        painel_coluna2.grid(row=0, column=1, sticky="nsew")
+        painel_coluna2.grid_propagate(False)
 
-        painel_direito = tb.Frame(self)
-        painel_direito.pack(side="left", fill="both", expand=True)
+        tb.Label(painel_coluna1, text="✨ Automação da Conformidade", font=("Segoe UI", 18, "bold"), foreground=VERDE_EXECUTAR).pack(anchor="w", padx=20, pady=(12, 0))
+        tb.Label(painel_coluna1, text="Escolha a planilha e um script para executar", font=("Segoe UI", 10), foreground=VERDE_CLARO_AVISO).pack(anchor="w", padx=20, pady=(0, 4))
 
-        tb.Label(painel_esquerdo, text="✨ Automação da Conformidade", font=("Segoe UI", 16, "bold"), bootstyle=PRIMARY).pack(anchor="w", padx=20, pady=(12, 0))
-        tb.Label(painel_esquerdo, text="Escolha a planilha e um script para executar", font=("Segoe UI", 10), bootstyle=SECONDARY).pack(anchor="w", padx=20, pady=(0, 4))
+        self._montar_seletor_planilha(painel_coluna1)
+        self._montar_menu(painel_coluna1, opcoes_coluna1)
 
-        self._montar_seletor_planilha(painel_esquerdo)
-        self._montar_menu(painel_esquerdo)
-        self._montar_chrome_debug(painel_esquerdo)
-        self._montar_saida(painel_direito)
+        self._montar_chrome_debug(painel_coluna2)
+        self._montar_menu(painel_coluna2, opcoes_coluna2) # Preencher Planilha (RO) e Baixar e anexar NE
+        self._montar_saida(painel_coluna2) # último - estica e preenche o resto da coluna
 
     def _montar_seletor_planilha(self, pai):
         # a Planilha de Controle muda todo mês, sem data certa - em vez de editar o nome fixo em
@@ -153,14 +183,13 @@ class App(tb.Window):
         self.botao_atualizar_planilhas.grid(row=1, column=1, sticky="e", padx=(6, 0), pady=(4, 0))
 
         self.status_planilha_var = tb.StringVar(value="")
-        tb.Label(quadro, textvariable=self.status_planilha_var, font=("Segoe UI", 8), bootstyle=SECONDARY, wraplength=460, justify="left").grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        tb.Label(quadro, textvariable=self.status_planilha_var, font=("Segoe UI", 8), bootstyle=SECONDARY, wraplength=380, justify="left").grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         self._atualizar_planilhas() # já carrega a lista ao abrir o app
 
     def _atualizar_planilhas(self):
         self.combo_planilha.configure(state="disabled")
         self.botao_atualizar_planilhas.configure(state="disabled")
-        self.status_planilha_var.set("⏳ Carregando planilhas da pasta do Drive...")
 
         thread = threading.Thread(target=self._carregar_planilhas, daemon=True)
         thread.start()
@@ -191,31 +220,36 @@ class App(tb.Window):
         self.combo_planilha.configure(values=nomes)
         if nomes:
             self.planilha_var.set(nomes[0]) # lista já vem da mais recente pra mais antiga
-            self.status_planilha_var.set(f"{len(nomes)} planilha(s) encontrada(s) - confira se é a certa antes de executar.")
+            self.status_planilha_var.set("Confira se é a certa antes de executar.")
         else:
             self.status_planilha_var.set("Nenhuma planilha encontrada na pasta indicada.")
 
-    def _montar_menu(self, pai):
-        for opcao in OPCOES:
-            # sem bootstyle no frame: fundo fica igual ao da janela, então os Labels (também sem bootstyle
-            # de cor) não ficam com texto claro sobre fundo claro - só a borda marca o "card"
-            quadro = tb.Frame(pai, padding=8, borderwidth=1, relief="solid")
-            quadro.pack(fill="x", padx=20, pady=3)
+    def _montar_menu(self, pai, opcoes):
+        for opcao in opcoes:
+            # tk.Frame com highlightbackground (não o relevo "solid" padrão do ttk) pra ter uma borda fina e
+            # clara, igual à das caixas de Planilha de Controle/Comando do Chrome, só que mais sutil (1px)
+            quadro_borda = tk.Frame(pai, highlightbackground=CINZA_BORDA_CARTAO, highlightthickness=1, bd=0)
+            quadro_borda.pack(fill="x", padx=20, pady=3)
+
+            quadro = tb.Frame(quadro_borda, padding=8)
+            quadro.pack(fill="both", expand=True)
             # minsize fixo: cada card tem sua própria grade, e emojis diferentes (ex: 📎, 18px)
             # renderizam mais estreitos que os outros (🔍🔗⬇️📥, 37px cada, medido com Font.measure)
             # na fonte - sem isso, a coluna do ícone varia de card pra card e o texto não começa
             # alinhado entre eles. 56 > 37+12(padx) garante que o piso vale pra todos igualmente
             quadro.columnconfigure(0, minsize=56)
-            quadro.columnconfigure(1, weight=1)
+            # sem weight na coluna do texto: ela não estica pra ocupar o card inteiro, então o botão fica
+            # logo depois do texto em vez de grudado na borda direita (o card agora é bem mais largo, já
+            # que as duas colunas da janela dividem toda a largura dela)
 
             tb.Label(quadro, text=opcao["icone"], font=("Segoe UI Emoji", 20)).grid(row=0, column=0, rowspan=3, padx=(0, 12), sticky="n")
 
-            tb.Label(quadro, text=opcao["titulo"], font=("Segoe UI", 10, "bold"), wraplength=460, justify="left").grid(row=0, column=1, sticky="w")
-            tb.Label(quadro, text=opcao["descricao"], font=("Segoe UI", 9), bootstyle=SECONDARY, wraplength=460, justify="left").grid(row=1, column=1, sticky="w", pady=(1, 0))
-            tb.Label(quadro, text=f"⚠ {opcao['requisito']}", font=("Segoe UI", 8), foreground=VERDE_CLARO_AVISO, wraplength=460, justify="left").grid(row=2, column=1, sticky="w", pady=(1, 0))
+            tb.Label(quadro, text=opcao["titulo"], font=("Segoe UI", 10, "bold"), wraplength=380, justify="left").grid(row=0, column=1, sticky="w")
+            tb.Label(quadro, text=opcao["descricao"], font=("Segoe UI", 9), bootstyle=SECONDARY, wraplength=380, justify="left").grid(row=1, column=1, sticky="w", pady=(1, 0))
+            tb.Label(quadro, text=f"⚠ {opcao['requisito']}", font=("Segoe UI", 8), foreground=VERDE_CLARO_AVISO, wraplength=380, justify="left").grid(row=2, column=1, sticky="w", pady=(1, 0))
 
-            botao = tb.Button(quadro, text="Executar ▶", bootstyle="success", width=13, command=lambda o=opcao: self.executar(o))
-            botao.grid(row=0, column=2, rowspan=3, sticky="e", padx=(6, 0))
+            botao = tb.Button(quadro, text="Executar ▶", bootstyle="success", width=10, command=lambda o=opcao: self.executar(o))
+            botao.grid(row=0, column=2, rowspan=3, sticky="n", padx=(12, 0))
             self.botoes.append(botao)
 
     def _montar_chrome_debug(self, pai):
@@ -243,7 +277,7 @@ class App(tb.Window):
         self.clipboard_append(COMANDO_CHROME_DEBUG)
 
     def _montar_saida(self, pai):
-        tb.Label(pai, text="Execução do script", font=("Segoe UI", 16, "bold"), bootstyle=PRIMARY).pack(anchor="w", padx=(12, 20), pady=(12, 0))
+        tb.Label(pai, text="Execução do script", font=("Segoe UI", 16, "bold"), foreground=VERDE_EXECUTAR).pack(anchor="w", padx=(12, 20), pady=(12, 0))
         tb.Label(pai, text="Acompanhe aqui o andamento e as mensagens do script em execução", font=("Segoe UI", 10), bootstyle=SECONDARY).pack(anchor="w", padx=(12, 20), pady=(0, 4))
 
         self.status_var = tb.StringVar(value="")

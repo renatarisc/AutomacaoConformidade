@@ -10,6 +10,7 @@ OPCOES = [
     {"numero": "3", "arquivo": "baixar_ob.py", "descricao": "Baixar OBs (pyautogui, baixa o PDF da OB no Sistema)"},
     {"numero": "4", "arquivo": "anexar_ob.py", "descricao": "Anexar OBs no Suap (anexa, assina e tramita o processo)"},
     {"numero": "5", "arquivo": "baixar_anexar_ne.py", "descricao": "Baixar e anexar NEs no Suap"},
+    {"numero": "6", "arquivo": "preencher_planilha_ro.py", "descricao": "Preencher RO/NC/NE na aba TesteRO a partir das abas de Andamento do processo abertas no Chrome"},
 ]
 
 def mostrar_menu():
