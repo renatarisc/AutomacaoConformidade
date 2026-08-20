@@ -97,7 +97,7 @@ OPCOES = [
         "coluna": 1,
         "icone": ICONE_CLIPE,
         "titulo": "Anexar OB e tramitar o processo",
-        "descricao": "Anexa no processo o PDF da OB pintada de amarelo e tramita.",
+        "descricao": "Anexa no processo o PDF da OB pintada de Amarelo e tramita.",
         "requisito": "Abre e loga no Suap sozinho - não precisa preparar nada antes.",
     },
 ]
