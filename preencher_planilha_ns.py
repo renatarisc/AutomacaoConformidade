@@ -145,6 +145,21 @@ def requisicao_valor_simples(sheet_id, numero_linha, indice_coluna, valor):
         }
     }
 
+def requisicao_texto_simples(sheet_id, numero_linha, indice_coluna, texto):
+    return {
+        "updateCells": {
+            "rows": [{"values": [{"userEnteredValue": {"stringValue": texto}}]}],
+            "fields": "userEnteredValue",
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": numero_linha - 1,
+                "endRowIndex": numero_linha,
+                "startColumnIndex": indice_coluna,
+                "endColumnIndex": indice_coluna + 1,
+            },
+        }
+    }
+
 def main(nome_planilha=None):
     # nome_planilha: passado pelo gui.py com a planilha escolhida na interface; rodando o
     # script sozinho (sem gui.py), usa escolher_planilha.NOME_PLANILHA_PADRAO
@@ -175,8 +190,10 @@ def main(nome_planilha=None):
     indice_np = cabecalho.index("NP")
     indice_ns = cabecalho.index("NS")
     indice_pagina = cabecalho.index("PÁGINA")
-    # a coluna DF segue a mesma lógica de NS/NP (mesclar_valores + destaque em azul), mas ainda não é
-    # preenchida - falta o usuário indicar de qual documento/tela ela é extraída
+    indice_df = cabecalho.index("DF")
+    # a extração de DF ainda não foi implementada (falta o usuário indicar de qual documento/tela ela
+    # sai) - até lá, toda célula sem DF recebe "---" (mesmo símbolo de "não aplicável" já usado em
+    # outras colunas da planilha, ex: Valor ISS) em vez de ficar em branco
 
     FORMATO_LINHA = { # mesmo estilo das linhas já existentes na tabela: texto centralizado e borda preenchida em cada célula
         "horizontalAlignment": "CENTER",
@@ -201,6 +218,7 @@ def main(nome_planilha=None):
                 "numero_linha": i,
                 "ns": linha_planilha[indice_ns] if indice_ns < len(linha_planilha) else "",
                 "np": linha_planilha[indice_np] if indice_np < len(linha_planilha) else "",
+                "df": linha_planilha[indice_df] if indice_df < len(linha_planilha) else "",
             }
 
     # ------- Conecta o Selenium no Chrome já logado no Suap, com as abas de Andamento do processo abertas -------
@@ -234,6 +252,7 @@ def main(nome_planilha=None):
             linha_nova[indice_favorecido] = dados["favorecido"]
             linha_nova[indice_ns] = ",".join(dados["ns_encontrados"])
             linha_nova[indice_np] = ",".join(dados["np_encontrados"])
+            linha_nova[indice_df] = "---" # extração de DF ainda não implementada
 
             resultado = aba.append_row(linha_nova, value_input_option="USER_ENTERED")
             numero_linha = int(re.search(r"![A-Z]+(\d+)", resultado["updates"]["updatedRange"]).group(1))
@@ -243,6 +262,7 @@ def main(nome_planilha=None):
                 "numero_linha": numero_linha,
                 "ns": linha_nova[indice_ns],
                 "np": linha_nova[indice_np],
+                "df": linha_nova[indice_df],
             }
         else:
             # processo já existente - só acrescenta o que ainda não está lá (nunca substitui), e destaca
@@ -258,6 +278,9 @@ def main(nome_planilha=None):
                 requisicoes.append(requisicao_texto_com_destaque(aba.id, numero_linha, indice_np, registro["np"], np_mesclado))
             if dados["pagina_inicial"] is not None:
                 requisicoes.append(requisicao_valor_simples(aba.id, numero_linha, indice_pagina, dados["pagina_inicial"]))
+            if not registro["df"]: # extração de DF ainda não implementada - só marca "---" se a célula ainda estiver vazia
+                requisicoes.append(requisicao_texto_simples(aba.id, numero_linha, indice_df, "---"))
+                registro["df"] = "---"
 
             if requisicoes:
                 aba.spreadsheet.batch_update({"requests": requisicoes})
