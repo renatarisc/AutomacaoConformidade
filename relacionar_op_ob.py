@@ -47,10 +47,11 @@ def main(nome_planilha=None):
     dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
     cores = carregar_cores_planilha.executar(aba) # chama a def
 
-    # as colunas OB ISS e OB PG guardam a OP relacionada pelo relacionar_valor_op.py; aqui ela é trocada pela OB correspondente
+    # as colunas OB ISS e OB PG guardam a OP relacionada pelo relacionar_valor_op.py; aqui ela é trocada pela OB
+    # correspondente - coluna calculada pelo nome do cabeçalho, não fixa, pra não quebrar se a coluna mudar de lugar
     COLUNAS_OB = [
-        {"coluna": 7, "nome": "OB ISS"},
-        {"coluna": 9, "nome": "OB PG"},
+        {"coluna": dados.columns.get_loc("OB ISS") + 1, "nome": "OB ISS"},
+        {"coluna": dados.columns.get_loc("OB PG") + 1, "nome": "OB PG"},
     ]
 
     VERMELHO = (1, 0, 0)

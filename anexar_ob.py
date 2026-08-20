@@ -16,12 +16,6 @@ import escolher_planilha
 import pintar_celula_planilha
 import encaminhar_processo
 
-# a cor amarelo claro 1 sinaliza que a OB (ISS ou PG) já foi baixada pelo baixar_ob.py e ainda precisa ser anexada ao processo
-COLUNAS_OB = [
-    {"coluna": 7, "nome": "OB ISS"},
-    {"coluna": 9, "nome": "OB PG"},
-]
-
 AMARELO_CLARO_1 = (1, 217 / 255, 102 / 255) # mesmo amarelo usado nos demais scripts do fluxo
 VERMELHO = (1, 0, 0)
 BRANCO = (1, 1, 1) # sinaliza que a OB já foi anexada e o processo tramitado - não precisa de mais nenhuma ação
@@ -103,6 +97,13 @@ def main(nome_planilha=None):
 
     dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
     cores = carregar_cores_planilha.executar(aba) # chama a def
+
+    # a cor amarelo claro 1 sinaliza que a OB (ISS ou PG) já foi baixada pelo baixar_ob.py e ainda precisa ser
+    # anexada ao processo - coluna calculada pelo nome do cabeçalho, não fixa, pra não quebrar se a coluna mudar de lugar
+    COLUNAS_OB = [
+        {"coluna": dados.columns.get_loc("OB ISS") + 1, "nome": "OB ISS"},
+        {"coluna": dados.columns.get_loc("OB PG") + 1, "nome": "OB PG"},
+    ]
 
     COLUNA_TRAMITADO = dados.columns.get_loc("TRAMITADO") + 1 # calculado pelo nome do cabeçalho, não fixo, pra não quebrar se a coluna mudar de lugar
 

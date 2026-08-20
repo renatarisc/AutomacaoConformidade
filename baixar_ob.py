@@ -73,10 +73,11 @@ def main(nome_planilha=None):
     dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
     cores = carregar_cores_planilha.executar(aba) # chama a def
 
-    # a cor amarelo claro 1 sinaliza que a OB (ISS ou PG) já foi relacionada pelo relacionar_op_ob.py e ainda precisa ser baixada
+    # a cor amarelo claro 1 sinaliza que a OB (ISS ou PG) já foi relacionada pelo relacionar_op_ob.py e ainda precisa
+    # ser baixada - coluna calculada pelo nome do cabeçalho, não fixa, pra não quebrar se a coluna mudar de lugar
     COLUNAS_OB = [
-        {"coluna": 7, "nome": "OB ISS", "nome_valor": "Valor ISS"},
-        {"coluna": 9, "nome": "OB PG", "nome_valor": "Valor PG"},
+        {"coluna": dados.columns.get_loc("OB ISS") + 1, "nome": "OB ISS", "nome_valor": "Valor ISS"},
+        {"coluna": dados.columns.get_loc("OB PG") + 1, "nome": "OB PG", "nome_valor": "Valor PG"},
     ]
 
     lista_processo = []
