@@ -12,6 +12,9 @@ import escolher_planilha
 # SIAFI CONSULTA-CONNS (Nota de Lançamento de Sistema) em vez de CONSULTA-CONRO - a cadeia de
 # documentos é NE -> NS -> NP (Nota de Pagamento), diferente da RO -> NC/NE do outro script
 RE_PROCESSO = re.compile(r"\d{5}\.\d{6}\.\d{4}-\d{2}")
+# a página 1 do PDF tem acentos corrompidos na extração do pypdf (ex: "n�mero" em vez de "número") -
+# "\D*?" entre "Nota Fiscal" e o número evita depender de casar o acento certo
+RE_NUMERO_NF = re.compile(r"Nota Fiscal\D*?(\d+)")
 RE_DESPACHO_SEM_OCORRENCIA = re.compile(r"Despacho:\s*Sem\s+ocorr[êe]ncia", re.IGNORECASE)
 RE_NUMERO_NS = re.compile(r"NUMERO\s*:\s*(2026NS\d+)")
 RE_TITULO_NP = re.compile(r"TITULO DE CREDITO\s*:\s*(2026NP\d+)")
@@ -60,6 +63,9 @@ def extrair_dados(arquivo_pdf):
         return None
     processo = match_processo.group()
 
+    match_nf = RE_NUMERO_NF.search(paginas[0]) # o nº da Nota Fiscal também vem no Assunto, na 1ª página
+    nf = match_nf.group(1) if match_nf else ""
+
     ns_encontrados = [] # números de NS distintos, na ordem em que apareceram no PDF
     np_encontrados = [] # números de NP distintos, na ordem em que apareceram no PDF
     favorecido = ""
@@ -89,6 +95,7 @@ def extrair_dados(arquivo_pdf):
     return {
         "processo": processo,
         "favorecido": favorecido,
+        "nf": nf,
         "ns_encontrados": ns_encontrados,
         "np_encontrados": np_encontrados,
         "pagina_inicial": pagina_inicial,
@@ -187,6 +194,7 @@ def main(nome_planilha=None):
 
     indice_processo = cabecalho.index("Processo")
     indice_favorecido = cabecalho.index("Favorecido")
+    indice_nf = cabecalho.index("NF")
     indice_np = cabecalho.index("NP")
     indice_ns = cabecalho.index("NS")
     indice_pagina = cabecalho.index("PÁGINA")
@@ -216,6 +224,7 @@ def main(nome_planilha=None):
         if processo_linha:
             registro_por_processo[processo_linha] = {
                 "numero_linha": i,
+                "nf": linha_planilha[indice_nf] if indice_nf < len(linha_planilha) else "",
                 "ns": linha_planilha[indice_ns] if indice_ns < len(linha_planilha) else "",
                 "np": linha_planilha[indice_np] if indice_np < len(linha_planilha) else "",
                 "df": linha_planilha[indice_df] if indice_df < len(linha_planilha) else "",
@@ -250,6 +259,7 @@ def main(nome_planilha=None):
             linha_nova = [""] * len(cabecalho)
             linha_nova[indice_processo] = processo
             linha_nova[indice_favorecido] = dados["favorecido"]
+            linha_nova[indice_nf] = dados["nf"]
             linha_nova[indice_ns] = ",".join(dados["ns_encontrados"])
             linha_nova[indice_np] = ",".join(dados["np_encontrados"])
             linha_nova[indice_df] = "---" # extração de DF ainda não implementada
@@ -260,6 +270,7 @@ def main(nome_planilha=None):
 
             registro_por_processo[processo] = {
                 "numero_linha": numero_linha,
+                "nf": linha_nova[indice_nf],
                 "ns": linha_nova[indice_ns],
                 "np": linha_nova[indice_np],
                 "df": linha_nova[indice_df],
@@ -281,6 +292,9 @@ def main(nome_planilha=None):
             if not registro["df"]: # extração de DF ainda não implementada - só marca "---" se a célula ainda estiver vazia
                 requisicoes.append(requisicao_texto_simples(aba.id, numero_linha, indice_df, "---"))
                 registro["df"] = "---"
+            if not registro["nf"] and dados["nf"]: # NF é único por processo (1 nota fiscal = 1 processo) - só preenche se ainda estiver vazio, nunca mescla
+                requisicoes.append(requisicao_texto_simples(aba.id, numero_linha, indice_nf, dados["nf"]))
+                registro["nf"] = dados["nf"]
 
             if requisicoes:
                 aba.spreadsheet.batch_update({"requests": requisicoes})
