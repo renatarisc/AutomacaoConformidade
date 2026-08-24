@@ -14,6 +14,8 @@ import anexar_ob
 import baixar_anexar_ne
 import preencher_planilha_ro
 import preencher_planilha_ns
+import cadastrar_contrato
+import conformidade
 
 # comando que abre o Chrome em modo de depuração remota (porta 9222), exigido pelos
 # scripts que se conectam via options.debugger_address - ver comentário no topo de cada main()
@@ -30,6 +32,7 @@ ICONE_LUPA = f"<svg {_SVG_ATRIBUTOS}><circle cx='11' cy='11' r='6'/><path d='m20
 ICONE_ELO = f"<svg {_SVG_ATRIBUTOS}><path d='m10.5 13.5 3-3'/><rect x='2.5' y='12.5' width='8' height='5' rx='2.5' transform='rotate(-45 6.5 15)'/><rect x='13.5' y='6.5' width='8' height='5' rx='2.5' transform='rotate(-45 17.5 9)'/></svg>"
 ICONE_BAIXAR = f"<svg {_SVG_ATRIBUTOS}><path d='M12 4v10'/><path d='m8 10.5 4 4 4-4'/><path d='M4 18h16'/></svg>"
 ICONE_CLIPE = f"<svg {_SVG_ATRIBUTOS}><path d='M8 12.5V7a4 4 0 1 1 8 0v9a2.5 2.5 0 0 1-5 0V8.5'/></svg>"
+ICONE_CONFERENCIA = f"<svg {_SVG_ATRIBUTOS}><circle cx='12' cy='12' r='9'/><path d='m8.5 12.5 2.5 2.5 4.5-5'/></svg>"
 
 # só os scripts que rodam sozinhos (fazem algo ao serem executados diretamente) entram no menu;
 # os módulos auxiliares (só definem funções, chamados por esses scripts) ficam de fora.
@@ -54,6 +57,15 @@ OPCOES = [
         "titulo": "Preencher Planilha de Controle (NS)",
         "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
         "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
+    },
+    {
+        "arquivo": "conformidade.py",
+        "modulo": conformidade,
+        "coluna": 1,
+        "icone": ICONE_CONFERENCIA,
+        "titulo": "Fazer Conformidade (NS)",
+        "descricao": "Documentos preenchidos x Fontes seguras (NF e BD).",
+        "requisito": "Usa o Chrome em modo debug se disponível; senão, PDFs baixados.",
     },
     {
         "arquivo": "baixar_anexar_ne.py",
@@ -133,6 +145,11 @@ class Api:
 
     def obter_comando_chrome(self):
         return COMANDO_CHROME_DEBUG
+
+    def abrir_cadastro_contrato(self):
+        # abre a tela de contratos numa janela própria (lista + formulário + banco local),
+        # separada da engine de execução de scripts usada pelos cards
+        cadastrar_contrato.abrir_janela()
 
     def listar_planilhas(self):
         # a Planilha de Controle muda todo mês, sem data certa - em vez de editar o nome fixo em
@@ -254,7 +271,8 @@ HTML_INTERFACE = r"""
 
   .coluna--2 { border-left: 1px solid var(--hairline); }
 
-  .cabecalho { display: flex; align-items: center; gap: 10px; }
+  .cabecalho { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .cabecalho__marca { display: flex; align-items: center; gap: 10px; min-width: 0; }
 
   .marca-icone {
     width: 34px; height: 34px; border-radius: 8px;
@@ -333,6 +351,9 @@ HTML_INTERFACE = r"""
 
   .btn--outline { padding: 7px 16px; background: var(--cloud); border-color: var(--hairline); color: var(--ink); }
   .btn--outline:hover:not(:disabled) { border-color: var(--pine); color: var(--pine-deep); }
+
+  .btn--acento { padding: 7px 16px; background: var(--pine-tint); border-color: var(--pine-tint-strong); color: var(--pine-deep); }
+  .btn--acento:hover:not(:disabled) { background: var(--pine-tint-strong); }
 
   .ajuda { margin: 6px 0 0; font-size: 11px; color: var(--ink-faint); }
 
@@ -425,11 +446,14 @@ HTML_INTERFACE = r"""
 <div class="app">
   <div class="coluna coluna--1">
     <div class="cabecalho">
-      <div class="marca-icone">✨</div>
-      <div>
-        <h1>Automação da Conformidade</h1>
-        <p class="subtitulo">Escolha a planilha e um script para executar.</p>
+      <div class="cabecalho__marca">
+        <div class="marca-icone">✨</div>
+        <div>
+          <h1>Automação da Conformidade</h1>
+          <p class="subtitulo">Escolha a planilha e um script para executar.</p>
+        </div>
       </div>
+      <button class="btn btn--acento" id="cadastrar-contrato" title="Cadastrar/Editar contrato">Cadastro de Contrato</button>
     </div>
 
     <div class="painel painel--acento">
@@ -558,6 +582,7 @@ HTML_INTERFACE = r"""
     document.getElementById("chrome-comando").value = await window.pywebview.api.obter_comando_chrome();
     document.getElementById("chrome-copiar").addEventListener("click", copiarComandoChrome);
     document.getElementById("planilha-atualizar").addEventListener("click", carregarPlanilhas);
+    document.getElementById("cadastrar-contrato").addEventListener("click", () => window.pywebview.api.abrir_cadastro_contrato());
 
     const opcoes = await window.pywebview.api.obter_opcoes();
     const coluna1 = document.getElementById("coluna1-cards");
