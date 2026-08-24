@@ -123,7 +123,7 @@ def main(nome_planilha=None):
             lista_processo.append({
                 "linha_planilha": linha_planilha,
                 "processo": str(dados.loc[linha, "Processo"]).strip(),
-                "despacho": str(dados.loc[linha, "DESPACHO"]).strip(),
+                "despacho": str(dados.loc[linha, "DESPACHO PROC"]).strip(), # coluna renomeada de "DESPACHO" na planilha
                 "obs": obs_pendentes,
             })
 
