@@ -56,7 +56,7 @@ OPCOES = [
         "icone": ICONE_DOCUMENTO,
         "titulo": "Preencher Planilha de Controle (NS)",
         "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
-        "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
+        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; senão, PDFs baixados.",
     },
     {
         "arquivo": "conformidade.py",
@@ -64,8 +64,8 @@ OPCOES = [
         "coluna": 1,
         "icone": ICONE_CONFERENCIA,
         "titulo": "Fazer Conformidade (NS)",
-        "descricao": "Documentos preenchidos x Fontes seguras (NF e BD).",
-        "requisito": "Usa o Chrome em modo debug se disponível; senão, PDFs baixados.",
+        "descricao": "Cara-Crachá: Documentos preenchidos x Fontes seguras (BD, Termo Gestor e NF).",
+        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; senão, PDFs baixados.",
     },
     {
         "arquivo": "baixar_anexar_ne.py",
@@ -73,7 +73,7 @@ OPCOES = [
         "coluna": 2,
         "icone": ICONE_DOCUMENTO_BAIXAR,
         "titulo": "Baixar e anexar NE e tramitar o processo",
-        "descricao": "Baixa do Siafi a NE pintada de Cinza, anexa no processo e tramita.",
+        "descricao": "Baixa do Siafi a NE pintada de Cinza (assinada), anexa no processo e tramita.",
         "requisito": "Requer o Chrome já aberto em modo debug e logado no Siafi.",
     },
     {
@@ -91,7 +91,7 @@ OPCOES = [
         "coluna": 1,
         "icone": ICONE_ELO,
         "titulo": "Relacionar OP → OB",
-        "descricao": "Busca a OB no Siafi a partir da OP pintada de Cinza, substitui na planilha e pinta de Amarelo.",
+        "descricao": "Busca a OB no Siafi a partir da OP pintada de Cinza (assinada), substitui na planilha e pinta de Amarelo.",
         "requisito": "Requer o Chrome já aberto em modo debug e logado no Siafi.",
     },
     {
@@ -100,8 +100,8 @@ OPCOES = [
         "coluna": 1,
         "icone": ICONE_BAIXAR,
         "titulo": "Baixar OB",
-        "descricao": "Baixa do Cara Preta o PDF da OB pintada de Amarelo (via pyautogui).",
-        "requisito": "Requer o Sistema já aberto e com foco antes de rodar a automação.",
+        "descricao": "Baixa do Siafi Operacional (Cara Preta) o PDF da OB pintada de Amarelo.",
+        "requisito": "Requer o Sistema já aberto e com o foco antes de começar a rodar a automação (pyautogui).",
     },
     {
         "arquivo": "anexar_ob.py",
@@ -212,7 +212,7 @@ HTML_INTERFACE = r"""
 <html lang="pt-br">
 <head>
 <meta charset="utf-8">
-<title>Automação da Conformidade</title>
+<title>Automações CCRGCI</title>
 <style>
   :root {
     --mist: #f2f5f3;
@@ -222,10 +222,10 @@ HTML_INTERFACE = r"""
     --ink: #16201b;
     --ink-soft: #56625b;
     --ink-faint: #8a958e;
-    --pine: #45a37e;
-    --pine-deep: #35815f;
-    --pine-tint: #e6f3ec;
-    --pine-tint-strong: #cfe9db;
+    --pine: #178c4e;
+    --pine-deep: #0f6b3b;
+    --pine-tint: #e2f5ea;
+    --pine-tint-strong: #c3ecd6;
     --console-bg: #1a1d1b;
     --console-fg: #e7ece9;
     --status-info: #2f7fd6;
@@ -277,9 +277,12 @@ HTML_INTERFACE = r"""
   .marca-icone {
     width: 34px; height: 34px; border-radius: 8px;
     background: var(--pine);
+    color: #fff;
     display: flex; align-items: center; justify-content: center;
     font-size: 17px; box-shadow: var(--shadow-1); flex: 0 0 auto;
   }
+
+  .marca-icone svg { width: 19px; height: 19px; }
 
   h1 {
     margin: 0;
@@ -304,7 +307,7 @@ HTML_INTERFACE = r"""
   .rotulo {
     font-weight: 600; font-size: 12px; margin: 0 0 8px;
     display: flex; align-items: center; gap: 6px;
-    color: var(--ink);
+    color: var(--pine);
   }
 
   .rotulo .ponto { width: 6px; height: 6px; border-radius: 50%; background: var(--pine); flex: 0 0 auto; }
@@ -400,7 +403,7 @@ HTML_INTERFACE = r"""
   .execucao { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; margin-top: 2px; }
 
   .execucao-cabecalho { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-  .execucao h2 { margin: 6px 0 0; font-size: 15px; font-weight: 600; }
+  .execucao h2 { margin: 6px 0 0; font-size: 15px; font-weight: 600; color: var(--pine-deep); }
   .execucao .subtitulo-exec { margin: 2px 0 8px; font-size: 12px; color: var(--ink-soft); }
 
   .status-chip {
@@ -438,7 +441,7 @@ HTML_INTERFACE = r"""
     box-shadow: var(--shadow-1);
   }
 
-  .console:empty::before { content: "A saída do script aparece aqui."; color: var(--ink-faint); opacity: 0.55; }
+  .console:empty::before { content: "Nenhuma automação em execução."; color: var(--ink-faint); opacity: 0.55; }
 </style>
 </head>
 <body>
@@ -447,10 +450,10 @@ HTML_INTERFACE = r"""
   <div class="coluna coluna--1">
     <div class="cabecalho">
       <div class="cabecalho__marca">
-        <div class="marca-icone">✨</div>
+        <div class="marca-icone"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
         <div>
-          <h1>Automação da Conformidade</h1>
-          <p class="subtitulo">Escolha a planilha e um script para executar.</p>
+          <h1>Automações CCRGCI</h1>
+          <p class="subtitulo">Escolha a planilha e uma automação para executar.</p>
         </div>
       </div>
       <button class="btn btn--acento" id="cadastrar-contrato" title="Cadastrar/Editar contrato">Cadastro de Contrato</button>
@@ -475,17 +478,17 @@ HTML_INTERFACE = r"""
         <input class="campo-comando" id="chrome-comando" readonly>
         <button class="btn btn--outline" id="chrome-copiar">Copiar</button>
       </div>
-      <p class="ajuda">Fecha todos os Chromes abertos e cole no CMD antes de rodar um script.</p>
+      <p class="ajuda">Feche todos os Chromes abertos. Clique em Abrir ou copie e cole no CMD antes de rodar a automação.</p>
     </div>
 
     <div id="coluna2-cards"></div>
 
     <div class="execucao">
       <div class="execucao-cabecalho">
-        <h2>Execução do script</h2>
+        <h2>Execução da Automação</h2>
         <span class="status-chip" id="status-chip" data-estado="ocioso"><span class="ponto"></span><span id="status-texto">Ocioso</span></span>
       </div>
-      <p class="subtitulo-exec">Acompanhe aqui o andamento e as mensagens do script em execução.</p>
+      <p class="subtitulo-exec">Acompanhe aqui o andamento e as mensagens da automação em execução.</p>
       <div class="console" id="console"></div>
     </div>
   </div>
@@ -604,7 +607,7 @@ HTML_INTERFACE = r"""
 if __name__ == "__main__":
     api = Api()
     window = webview.create_window(
-        "Automação da Conformidade",
+        "Automações da Coordenação de Conformidade de Registro de Gestão do Campus Itaperuna - CCRGCI",
         html=HTML_INTERFACE,
         js_api=api,
         width=1400,

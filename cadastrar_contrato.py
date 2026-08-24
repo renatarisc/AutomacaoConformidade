@@ -36,7 +36,7 @@ HTML_CONTRATO = r"""
 <html lang="pt-br">
 <head>
 <meta charset="utf-8">
-<title>Cadastro de Contratos</title>
+<title>CCRGCI - Cadastro de Contratos</title>
 <style>
   :root {
     --mist: #f2f5f3;
@@ -45,10 +45,10 @@ HTML_CONTRATO = r"""
     --ink: #16201b;
     --ink-soft: #56625b;
     --ink-faint: #8a958e;
-    --pine: #45a37e;
-    --pine-deep: #35815f;
-    --pine-tint: #e6f3ec;
-    --pine-tint-strong: #cfe9db;
+    --pine: #178c4e;
+    --pine-deep: #0f6b3b;
+    --pine-tint: #e2f5ea;
+    --pine-tint-strong: #c3ecd6;
     --status-error: #d1453d;
     --status-error-tint: #fbe9e8;
     --shadow-1: 0 1px 2px rgba(20,32,27,0.07), 0 1px 1px rgba(20,32,27,0.05);
@@ -65,7 +65,17 @@ HTML_CONTRATO = r"""
   .pagina { max-width: 900px; margin: 0 auto; padding: 22px 26px 40px; }
 
   .cabecalho { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 16px; }
+  .cabecalho__marca { display: flex; align-items: center; gap: 10px; min-width: 0; }
   h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
+
+  .marca-icone {
+    width: 34px; height: 34px; border-radius: 8px;
+    background: var(--pine);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: var(--shadow-1); flex: 0 0 auto;
+  }
+  .marca-icone svg { width: 19px; height: 19px; }
 
   .btn {
     font-family: inherit; font-size: 12.5px; font-weight: 600;
@@ -90,16 +100,16 @@ HTML_CONTRATO = r"""
   .vazio { padding: 26px; text-align: center; color: var(--ink-faint); }
 
   .painel {
-    border: 1px solid var(--hairline); border-radius: 10px; background: var(--cloud);
+    border: 1px solid var(--hairline); border-radius: 10px; background: var(--pine-tint);
     box-shadow: var(--shadow-1); padding: 14px 16px; margin-bottom: 14px;
   }
-  .painel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+  .painel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--pine-deep); }
   .painel--acento { border-color: var(--pine-tint-strong); background: var(--pine-tint); }
 
   .rotulo {
     font-weight: 600; font-size: 12px; margin: 0 0 8px;
     display: flex; align-items: center; gap: 6px;
-    color: var(--ink);
+    color: var(--pine);
   }
   .rotulo .ponto { width: 6px; height: 6px; border-radius: 50%; background: var(--pine); flex: 0 0 auto; }
 
@@ -177,7 +187,8 @@ HTML_CONTRATO = r"""
 
 <div class="pagina">
   <div class="cabecalho">
-    <div>
+    <div class="cabecalho__marca">
+      <div class="marca-icone"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M12 12v6"/><path d="M9 15h6"/></svg></div>
       <h1>Cadastro de Contratos</h1>
     </div>
     <button class="btn btn--acento" id="botao-novo">+ Novo contrato</button>
@@ -453,7 +464,7 @@ HTML_CONTRATO = r"""
         <td>${contrato.situacao === "encerrado" ? "Encerrado" : "Vigente"}</td>
         <td>${formatarData(contrato.vigencia_inicio)} - <span class="${deveDestacarVencido(contrato) ? "vigencia-vencida" : ""}">${formatarData(contrato.vigencia_fim)}</span></td>
         <td class="acoes">
-          <button class="btn btn--outline btn--mini" data-editar="${contrato.id}">Editar</button>
+          <button class="btn btn--acento btn--mini" data-editar="${contrato.id}">Editar</button>
           <button class="btn btn--perigo btn--mini" data-excluir="${contrato.id}">Excluir</button>
         </td>
       </tr>
@@ -946,12 +957,12 @@ def abrir_janela():
     # cria a janela em cima da instância de webview já em execução (a principal do gui.py) -
     # não chama webview.start() de novo, pywebview permite criar janelas dinamicamente
     contratos_db.inicializar_db()
-    webview.create_window("Cadastro de Contratos", html=HTML_CONTRATO, js_api=ApiContrato(), width=980, height=760)
+    webview.create_window("CCRGCI - Cadastro de Contratos", html=HTML_CONTRATO, js_api=ApiContrato(), width=980, height=760)
 
 def main(nome_planilha=None):
     # permite rodar este arquivo sozinho (fora do gui.py) pra testar a tela isolada
     contratos_db.inicializar_db()
-    webview.create_window("Cadastro de Contratos", html=HTML_CONTRATO, js_api=ApiContrato(), width=980, height=760)
+    webview.create_window("CCRGCI - Cadastro de Contratos", html=HTML_CONTRATO, js_api=ApiContrato(), width=980, height=760)
     webview.start()
 
 if __name__ == "__main__":

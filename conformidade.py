@@ -142,6 +142,19 @@ def exibir_competencia(bruto, normalizado):
 # ------- dados da própria nota fiscal (fonte segura) -------
 
 RE_VALOR_SERVICO_NF = re.compile(r"Valor do Servi\D?o\s*\n?\s*R\$\s*([\d.,]+)")
+RE_VALOR_LIQUIDO_NF = re.compile(r"Valor L[íi]quido da NFS-e\s*\n?\s*R\$\s*([\d.,]+)", re.IGNORECASE)
+# ancorado em "Prestador do Serviço" - a NF também tem o CNPJ do tomador (o próprio IFFluminense)
+# logo depois, sob o mesmo rótulo "CNPJ / CPF / NIF", então não dá pra buscar o rótulo sozinho
+RE_CNPJ_PRESTADOR_NF = re.compile(
+    r"Prestador do Servi[çc]o\s*\n?\s*CNPJ\s*/\s*CPF\s*/\s*NIF\s*\n?\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})",
+    re.IGNORECASE)
+# número do contrato e domicílio bancário nem toda NF cita - quando cita, vem dentro do texto
+# livre da "Descrição do Serviço" (confirmado no euro.pdf: "...Conforme contrato nº68/2024..." e
+# "...*Dados Bancários: Caixa Econômica Federal (104) | Ag 0212 | C/c 578536626-2*")
+RE_CONTRATO_NF = re.compile(r"contrato\s*n[ºo°]\s*(\d+/\d+)", re.IGNORECASE)
+RE_DADOS_BANCARIOS_NF = re.compile(
+    r"Dados Banc[áa]rios:\s*([^|]+?)\s*\(\s*(\d+)\s*\)\s*\|\s*Ag\s*(\d+)\s*\|\s*C/c\s*([\d-]+)",
+    re.IGNORECASE)
 
 def obter_dados_nf(paginas):
     # None se a NF não foi localizada/lida (ex: página-imagem, sem texto) - quem chama trata
@@ -151,12 +164,22 @@ def obter_dados_nf(paginas):
         return None
     match_nf = ns.RE_NUMERO_NF.search(texto_nf)
     match_valor = RE_VALOR_SERVICO_NF.search(texto_nf)
+    match_valor_liquido = RE_VALOR_LIQUIDO_NF.search(texto_nf)
+    match_cnpj = RE_CNPJ_PRESTADOR_NF.search(texto_nf)
+    match_contrato = RE_CONTRATO_NF.search(texto_nf)
+    match_bancario = RE_DADOS_BANCARIOS_NF.search(texto_nf)
     return {
         "paginas": paginas_nf,
         "nf": match_nf.group(1) if match_nf else "",
         "emissao": ns.extrair_data_emissao_nf(texto_nf),
         "competencia": ns.extrair_competencia_nf(texto_nf),
         "valor": match_valor.group(1) if match_valor else "",
+        "valor_liquido": match_valor_liquido.group(1) if match_valor_liquido else "",
+        "cnpj": match_cnpj.group(1) if match_cnpj else "",
+        "contrato": match_contrato.group(1) if match_contrato else "",
+        "banco": f"{match_bancario.group(1).strip()} ({match_bancario.group(2)})" if match_bancario else "",
+        "agencia": match_bancario.group(3) if match_bancario else "",
+        "conta": match_bancario.group(4) if match_bancario else "",
     }
 
 def pagina_nf_str(dados_nf):
@@ -200,8 +223,14 @@ def linha_tabela(campo, fonte_texto, fonte_disponivel, doc_texto, doc_disponivel
         "resultado": "ok" if bate is True else ("nao" if bate is False else "indefinido"),
     }
 
-def montar_tabela(nome_arquivo, nome_documento, pagina, linhas):
-    return {"arquivo": nome_arquivo, "documento": nome_documento, "pagina": pagina, "linhas": linhas}
+def montar_tabela(nome_arquivo, nome_documento, pagina, linhas, observacao=None):
+    # observacao: nota de destaque (vermelha na janela HTML) mostrada no fim do bloco, pra campo
+    # que o próprio documento determina e não tem fonte segura pra conferir contra (ex: Competência
+    # e Valor do Termo Circunstanciado - ver processar_termo_circunstanciado)
+    bloco = {"arquivo": nome_arquivo, "documento": nome_documento, "pagina": pagina, "linhas": linhas}
+    if observacao:
+        bloco["observacao"] = observacao
+    return bloco
 
 def formatar_bloco_markdown(bloco):
     # usado só pelo main()/CLI (rodar este arquivo sozinho) - a janela HTML não passa por aqui,
@@ -214,7 +243,8 @@ def formatar_bloco_markdown(bloco):
         resultado = {"ok": "✅", "nao": "❌", "indefinido": "➖"}[linha["resultado"]]
         linhas_md.append(f"| {linha['campo']} | {fonte} | {doc} | {resultado} |")
     corpo = "\n".join(["| Campo | Fonte segura | Documento | Resultado |", "|---|---|---|---|", *linhas_md])
-    return f"{cabecalho}\n\n{corpo}"
+    observacao = f"\n\n⚠️ {bloco['observacao']}" if bloco.get("observacao") else ""
+    return f"{cabecalho}\n\n{corpo}{observacao}"
 
 # ------- Documento 1: Relatório Circunstanciado de Recebimento Provisório -------
 
@@ -225,11 +255,14 @@ RE_VALOR_GENERICO = re.compile(r"no valor de\s*R\$\s*([\d.,]+)", re.IGNORECASE)
 RE_PERIODO_DOCUMENTO = re.compile(r"no per[íi]odo de\s*(\d{2}/\d{2}/\d{4})\s*a\s*(\d{2}/\d{2}/\d{4})")
 RE_CONTRATADA_RELATORIO = re.compile(r"prestados pela Contratada\s*\n?(.+?)\n?\s*\(", re.DOTALL)
 
-def processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, contrato, dados_nf):
-    indice = next((i for i, t in enumerate(paginas)
-                   if "Relatório Circunstanciado de Recebimento Provisório" in t), None)
-    if indice is None:
+def processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer):
+    # usa a ÚLTIMA ocorrência, não a primeira - documento pode ser refeito/corrigido no meio do
+    # processo (mesmo raciocínio do RAMR/IMR, ver processar_relatorio_avaliacao_medicao), e a
+    # versão mais recente sempre substitui as anteriores
+    indices = [i for i, t in enumerate(paginas) if "Relatório Circunstanciado de Recebimento Provisório" in t]
+    if not indices:
         return None
+    indice = indices[-1]
     texto = remover_duplicatas_consecutivas(paginas[indice])
 
     linhas = []
@@ -247,7 +280,7 @@ def processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, cont
     doc_contratada = limpar_espacos(m_contratada.group(1)) if m_contratada else None
     fonte_contratada = contrato["nome_contratada"] if contrato else None
     linhas.append(linha_tabela(
-        "Contratada", fonte_contratada or "contrato não encontrado no banco", bool(fonte_contratada),
+        "Contratada", f"{fonte_contratada} (BD)" if fonte_contratada else "contrato não encontrado no banco", bool(fonte_contratada),
         doc_contratada or "não encontrado no documento", bool(doc_contratada),
         comparar_textos(fonte_contratada, doc_contratada) if fonte_contratada and doc_contratada else None,
     ))
@@ -257,7 +290,7 @@ def processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, cont
     fonte_cnpj = contrato["cnpj"] if contrato else None
     fonte_cnpj_fmt = _formatar_cnpj(fonte_cnpj) if fonte_cnpj else None
     linhas.append(linha_tabela(
-        "CNPJ", fonte_cnpj_fmt or "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
         doc_cnpj or "não encontrado no documento", bool(doc_cnpj),
         comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
     ))
@@ -266,7 +299,7 @@ def processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, cont
     doc_contrato = m_contrato_doc.group(1) if m_contrato_doc else None
     fonte_contrato = contrato["numero_contrato"] if contrato else None
     linhas.append(linha_tabela(
-        "Contrato", fonte_contrato or "contrato não encontrado no banco", bool(fonte_contrato),
+        "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
         doc_contrato or "não encontrado no documento", bool(doc_contrato),
         comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
     ))
@@ -279,29 +312,31 @@ def processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, cont
         comparar_numeros(dados_nf["nf"], doc_nf) if dados_nf and dados_nf["nf"] and doc_nf else None,
     ))
 
+    (fonte_comp_texto, fonte_comp_disp), competencia_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "competencia")
     doc_comp_bruto, doc_comp = extrair_competencia_documento(texto)
     linhas.append(linha_tabela(
-        "Competência", *_fonte_nf(dados_nf, "competencia"),
+        "Competência", fonte_comp_texto, fonte_comp_disp,
         exibir_competencia(doc_comp_bruto, doc_comp) or "não encontrada no documento", bool(doc_comp_bruto),
-        (dados_nf["competencia"] == doc_comp) if dados_nf and dados_nf["competencia"] and doc_comp else None,
+        (competencia_ref == doc_comp) if competencia_ref and doc_comp else None,
     ))
 
-    fonte_periodo = calcular_periodo(dados_nf["competencia"]) if dados_nf and dados_nf["competencia"] else None
+    fonte_periodo = calcular_periodo(competencia_ref) if competencia_ref else None
     m_periodo = RE_PERIODO_DOCUMENTO.search(texto)
     doc_periodo = f"{m_periodo.group(1)} a {m_periodo.group(2)}" if m_periodo else None
     linhas.append(linha_tabela(
         "Período",
-        f"{fonte_periodo} (calculado)" if fonte_periodo else "depende da competência", bool(fonte_periodo),
+        f"{fonte_periodo} (calculado c/ base na competência)" if fonte_periodo else "depende da competência", bool(fonte_periodo),
         doc_periodo or "não encontrado no documento", bool(doc_periodo),
         (fonte_periodo == doc_periodo) if fonte_periodo and doc_periodo else None,
     ))
 
+    (fonte_valor_texto, fonte_valor_disp), valor_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "valor")
     m_valor_doc = RE_VALOR_GENERICO.search(texto)
     doc_valor = m_valor_doc.group(1) if m_valor_doc else None
     linhas.append(linha_tabela(
-        "Valor", *_fonte_nf(dados_nf, "valor"),
+        "Valor", fonte_valor_texto, fonte_valor_disp,
         doc_valor or "não encontrado no documento", bool(doc_valor),
-        comparar_numeros(dados_nf["valor"], doc_valor) if dados_nf and dados_nf["valor"] and doc_valor else None,
+        comparar_numeros(valor_ref, doc_valor) if valor_ref and doc_valor else None,
     ))
 
     return montar_tabela(nome_arquivo, "Relatório Circunstanciado de Recebimento Provisório", indice + 1, linhas)
@@ -312,11 +347,13 @@ RE_CONTRATADA_DESPACHO = re.compile(r"prestados pela empresa\s*\n?(.+?)\n?\s*,\s
 RE_TIPO_SERVICO = re.compile(r"referente\s+(?:à|ao servi[cç]o de)\s*\n?(.+?)\n?\s*,\s*\n?\s*competência",
                               re.DOTALL | re.IGNORECASE)
 
-def processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf):
-    indice = next((i for i, t in enumerate(paginas)
-                   if "Despacho de Ateste de Nota Fiscal" in t), None)
-    if indice is None:
+def processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf, dados_parecer):
+    # última ocorrência, não a primeira - mesmo raciocínio do RAMR/IMR (ver
+    # processar_relatorio_avaliacao_medicao): se o despacho foi refeito/corrigido, o mais recente vale
+    indices = [i for i, t in enumerate(paginas) if "Despacho de Ateste de Nota Fiscal" in t]
+    if not indices:
         return None
+    indice = indices[-1]
     texto = remover_duplicatas_consecutivas(paginas[indice])
 
     linhas = []
@@ -332,7 +369,7 @@ def processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf):
 
     fonte_contratada = contrato["nome_contratada"] if contrato else None
     linhas.append(linha_tabela(
-        "Contratada", fonte_contratada or "contrato não encontrado no banco", bool(fonte_contratada),
+        "Contratada", f"{fonte_contratada} (BD)" if fonte_contratada else "contrato não encontrado no banco", bool(fonte_contratada),
         doc_contratada or "não encontrado no documento", bool(doc_contratada),
         comparar_textos(fonte_contratada, doc_contratada) if fonte_contratada and doc_contratada else None,
     ))
@@ -341,21 +378,32 @@ def processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf):
     fonte_cnpj_fmt = _formatar_cnpj(fonte_cnpj) if fonte_cnpj else None
     if doc_cnpj:
         linhas.append(linha_tabela(
-            "CNPJ", fonte_cnpj_fmt or "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+            "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
             doc_cnpj, True,
             comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt else None,
         ))
     else:
         linhas.append(linha_tabela(
-            "CNPJ", fonte_cnpj_fmt or "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+            "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
             "CNPJ não citado nesse documento", False, None,
         ))
+
+    m_tipo = RE_TIPO_SERVICO.search(texto)
+    doc_tipo = limpar_espacos(m_tipo.group(1)) if m_tipo else None
+    fonte_objeto = contrato["objeto"] if contrato else None
+    linhas.append(linha_tabela(
+        "Tipo de serviço",
+        f"{fonte_objeto} (BD)" if fonte_objeto else ("objeto não cadastrado no banco" if contrato else "contrato não encontrado no banco"),
+        bool(fonte_objeto),
+        doc_tipo or "não encontrado no documento", bool(doc_tipo),
+        comparar_textos(fonte_objeto, doc_tipo) if fonte_objeto and doc_tipo else None,
+    ))
 
     m_contrato_doc = RE_CONTRATO_GENERICO.search(texto)
     doc_contrato = m_contrato_doc.group(1) if m_contrato_doc else None
     fonte_contrato = contrato["numero_contrato"] if contrato else None
     linhas.append(linha_tabela(
-        "Contrato", fonte_contrato or "contrato não encontrado no banco", bool(fonte_contrato),
+        "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
         doc_contrato or "não encontrado no documento", bool(doc_contrato),
         comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
     ))
@@ -368,22 +416,12 @@ def processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf):
         comparar_numeros(dados_nf["nf"], doc_nf) if dados_nf and dados_nf["nf"] and doc_nf else None,
     ))
 
+    (fonte_comp_texto, fonte_comp_disp), competencia_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "competencia")
     doc_comp_bruto, doc_comp = extrair_competencia_documento(texto)
     linhas.append(linha_tabela(
-        "Competência", *_fonte_nf(dados_nf, "competencia"),
+        "Competência", fonte_comp_texto, fonte_comp_disp,
         exibir_competencia(doc_comp_bruto, doc_comp) or "não encontrada no documento", bool(doc_comp_bruto),
-        (dados_nf["competencia"] == doc_comp) if dados_nf and dados_nf["competencia"] and doc_comp else None,
-    ))
-
-    m_tipo = RE_TIPO_SERVICO.search(texto)
-    doc_tipo = limpar_espacos(m_tipo.group(1)) if m_tipo else None
-    fonte_objeto = contrato["objeto"] if contrato else None
-    linhas.append(linha_tabela(
-        "Tipo de serviço",
-        fonte_objeto or ("objeto não cadastrado no banco" if contrato else "contrato não encontrado no banco"),
-        bool(fonte_objeto),
-        doc_tipo or "não encontrado no documento", bool(doc_tipo),
-        comparar_textos(fonte_objeto, doc_tipo) if fonte_objeto and doc_tipo else None,
+        (competencia_ref == doc_comp) if competencia_ref and doc_comp else None,
     ))
 
     return montar_tabela(nome_arquivo, "Despacho de Ateste de Nota Fiscal de Serviço", indice + 1, linhas)
@@ -396,10 +434,14 @@ RE_DT_EMISSAO = re.compile(r"Dt\. Emiss[ãa]o:\s*(\d{2}/\d{2}/\d{4})")
 RE_VALOR_FATURADO = re.compile(r"Valor Faturado:\s*R\$\s*([\d.,]+)")
 RE_VALOR_LIQUIDO = re.compile(r"Valor Liquido:\s*R\$\s*([\d.,]+)")
 
-def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato, dados_nf):
-    indice = next((i for i, t in enumerate(paginas) if "Instrumentos de cobrança" in t), None)
-    if indice is None:
+def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer):
+    # última ocorrência, não a primeira - mesmo raciocínio do RAMR/IMR (ver
+    # processar_relatorio_avaliacao_medicao); confirmado real no prevelar.pdf, que tem 2 páginas de
+    # Instrumentos de Cobrança com Dt. Emissão diferente (17/07 vs 16/07 - correção posterior)
+    indices = [i for i, t in enumerate(paginas) if "Instrumentos de cobrança" in t]
+    if not indices:
         return None
+    indice = indices[-1]
     texto = paginas[indice]  # sem duplicação de linha nessa página (é tabela rótulo:valor, não texto corrido)
 
     linhas = []
@@ -415,7 +457,7 @@ def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato,
     doc_contrato = m_contrato_doc.group(1) if m_contrato_doc else None
     fonte_contrato = contrato["numero_contrato"] if contrato else None
     linhas.append(linha_tabela(
-        "Contrato", fonte_contrato or "contrato não encontrado no banco", bool(fonte_contrato),
+        "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
         doc_contrato or "não encontrado no documento", bool(doc_contrato),
         comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
     ))
@@ -436,27 +478,30 @@ def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato,
         (dados_nf["emissao"] == doc_emissao) if dados_nf and dados_nf["emissao"] and doc_emissao else None,
     ))
 
+    (fonte_comp_texto, fonte_comp_disp), competencia_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "competencia")
     doc_comp_bruto, doc_comp = extrair_competencia_documento(texto, aceitar_numerico=True)
     linhas.append(linha_tabela(
-        "Competência", *_fonte_nf(dados_nf, "competencia"),
+        "Competência", fonte_comp_texto, fonte_comp_disp,
         exibir_competencia(doc_comp_bruto, doc_comp) or "não encontrada no documento", bool(doc_comp_bruto),
-        (dados_nf["competencia"] == doc_comp) if dados_nf and dados_nf["competencia"] and doc_comp else None,
+        (competencia_ref == doc_comp) if competencia_ref and doc_comp else None,
     ))
+
+    (fonte_valor_texto, fonte_valor_disp), valor_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "valor")
 
     m_valor_fat = RE_VALOR_FATURADO.search(texto)
     doc_valor_fat = m_valor_fat.group(1) if m_valor_fat else None
     linhas.append(linha_tabela(
-        "Valor Faturado", *_fonte_nf(dados_nf, "valor"),
+        "Valor Faturado", fonte_valor_texto, fonte_valor_disp,
         doc_valor_fat or "não encontrado no documento", bool(doc_valor_fat),
-        comparar_numeros(dados_nf["valor"], doc_valor_fat) if dados_nf and dados_nf["valor"] and doc_valor_fat else None,
+        comparar_numeros(valor_ref, doc_valor_fat) if valor_ref and doc_valor_fat else None,
     ))
 
     m_valor_liq = RE_VALOR_LIQUIDO.search(texto)
     doc_valor_liq = m_valor_liq.group(1) if m_valor_liq else None
     linhas.append(linha_tabela(
-        "Valor Líquido", *_fonte_nf(dados_nf, "valor"),
+        "Valor Líquido", fonte_valor_texto, fonte_valor_disp,
         doc_valor_liq or "não encontrado no documento", bool(doc_valor_liq),
-        comparar_numeros(dados_nf["valor"], doc_valor_liq) if dados_nf and dados_nf["valor"] and doc_valor_liq else None,
+        comparar_numeros(valor_ref, doc_valor_liq) if valor_ref and doc_valor_liq else None,
     ))
 
     doc_empenhos = ns.extrair_empenhos([texto])
@@ -465,13 +510,337 @@ def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato,
     bate_empenhos = all(e in fonte_empenhos for e in doc_empenhos) if doc_empenhos and fonte_empenhos else None
     linhas.append(linha_tabela(
         "Empenhos",
-        ", ".join(fonte_empenhos) if fonte_empenhos else ("nenhum empenho cadastrado nesse contrato" if contrato else "contrato não encontrado no banco"),
+        f"{', '.join(fonte_empenhos)} (BD)" if fonte_empenhos else ("nenhum empenho cadastrado nesse contrato" if contrato else "contrato não encontrado no banco"),
         bool(fonte_empenhos),
         doc_empenhos_str or "não encontrado no documento", bool(doc_empenhos_str),
         bate_empenhos,
     ))
 
     return montar_tabela(nome_arquivo, "Instrumentos de Cobrança", indice + 1, linhas)
+
+# ------- Documento 4: Relatório de Avaliação e Medição dos Resultados (RAMR/IMR) -------
+
+# rótulos em CAIXA ALTA e cada um seguido do valor numa linha própria (às vezes com o mês e o "/"
+# em linhas separadas também) - formato confirmado no euro.pdf, bem diferente da prosa corrida dos
+# outros 3 documentos, por isso os regexes daqui são todos dedicados, não reaproveitam os genéricos
+RE_COMPETENCIA_RAMR = re.compile(r"COMPET[ÊE]NCIA:\s*\n?\s*([A-Za-zçÇãÃéÉêÊúÚ]+)\s*\n?\s*/\s*\n?\s*(\d{4})", re.IGNORECASE)
+RE_VIGENCIA_RAMR = re.compile(r"VIG[ÊE]NCIA:\s*\n?\s*(\d{2}/\d{2}/\d{4})\s*A\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
+RE_CONTRATO_RAMR = re.compile(r"CONTRATO N[ºo°]\s*\n?\s*([\d./]+)", re.IGNORECASE)
+RE_CONTRATADO_RAMR = re.compile(r"CONTRATADO:\s*\n?\s*(.+?)\s*\n\s*CNPJ:", re.IGNORECASE)
+RE_CNPJ_RAMR = re.compile(r"CNPJ:\s*\n?\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", re.IGNORECASE)
+RE_PERIODO_RAMR = re.compile(r"Per[íi]odo de Avalia[çc][ãa]o:\s*\n?\s*(\d{2}/\d{2}/\d{4})\s*A\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
+
+def _extrair_competencia_ramr(texto):
+    # mesma ideia de extrair_competencia_documento(), mas rótulo próprio ("COMPETÊNCIA:" com dois
+    # pontos, mês e ano em linhas separadas) - devolve (bruto_pra_exibir, normalizado) ou (None, None)
+    m = RE_COMPETENCIA_RAMR.search(texto)
+    if not m:
+        return None, None
+    numero_mes = _mes_para_numero(m.group(1))
+    if not numero_mes:
+        return None, None
+    return f"{m.group(1)}/{m.group(2)}", f"{_MESES_NOME[numero_mes]}/{m.group(2)}"
+
+def processar_relatorio_avaliacao_medicao(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer):
+    # esse relatório costuma ser corrigido/refeito (o gestor do contrato pede um novo quando acha
+    # erro no anterior, ex: vigência errada) - cada nova versão repete o mesmo título no PDF, então
+    # usa a ÚLTIMA ocorrência (a mais recente sempre corrige/substitui as anteriores), não a
+    # primeira, diferente dos outros 3 documentos (esses não costumam ser refeitos assim)
+    indices = [i for i, t in enumerate(paginas) if "RELATÓRIO DE AVALIAÇÃO E MEDIÇÃO DOS RESULTADOS" in t]
+    if not indices:
+        return None
+    indice = indices[-1]
+    # a tabela de pontuação sempre estoura pra página seguinte (confirmado no euro.pdf - "Pontuação
+    # Total do Serviço" nunca cabe na mesma página do título) - por isso junta as duas antes de
+    # aplicar os regexes; os outros 3 documentos não precisam disso porque seus campos cabem numa página só
+    texto_bruto = paginas[indice] + ("\n" + paginas[indice + 1] if indice + 1 < len(paginas) else "")
+    texto = remover_duplicatas_consecutivas(texto_bruto)
+
+    linhas = []
+
+    doc_processo = ns.RE_PROCESSO.search(texto)
+    doc_processo_valor = doc_processo.group() if doc_processo else None
+    linhas.append(linha_tabela(
+        "Processo",
+        f"{processo_p1} (pág. 1)" if processo_p1 else "não encontrado", bool(processo_p1),
+        doc_processo_valor or "não encontrado no documento", bool(doc_processo_valor),
+        comparar_textos(processo_p1, doc_processo_valor) if processo_p1 and doc_processo_valor else None,
+    ))
+
+    m_contratada = RE_CONTRATADO_RAMR.search(texto)
+    doc_contratada = limpar_espacos(m_contratada.group(1)) if m_contratada else None
+    fonte_contratada = contrato["nome_contratada"] if contrato else None
+    linhas.append(linha_tabela(
+        "Contratada", f"{fonte_contratada} (BD)" if fonte_contratada else "contrato não encontrado no banco", bool(fonte_contratada),
+        doc_contratada or "não encontrado no documento", bool(doc_contratada),
+        comparar_textos(fonte_contratada, doc_contratada) if fonte_contratada and doc_contratada else None,
+    ))
+
+    m_cnpj = RE_CNPJ_RAMR.search(texto)
+    doc_cnpj = m_cnpj.group(1) if m_cnpj else None
+    fonte_cnpj = contrato["cnpj"] if contrato else None
+    fonte_cnpj_fmt = _formatar_cnpj(fonte_cnpj) if fonte_cnpj else None
+    linhas.append(linha_tabela(
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        doc_cnpj or "não encontrado no documento", bool(doc_cnpj),
+        comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
+    ))
+
+    m_contrato_doc = RE_CONTRATO_RAMR.search(texto)
+    doc_contrato = m_contrato_doc.group(1) if m_contrato_doc else None
+    fonte_contrato = contrato["numero_contrato"] if contrato else None
+    linhas.append(linha_tabela(
+        "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
+        doc_contrato or "não encontrado no documento", bool(doc_contrato),
+        comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
+    ))
+
+    fonte_vigencia = None
+    if contrato and contrato.get("vigencia_inicio") and contrato.get("vigencia_fim"):
+        fonte_vigencia = f"{_formatar_data_iso(contrato['vigencia_inicio'])} A {_formatar_data_iso(contrato['vigencia_fim'])}"
+    m_vigencia = RE_VIGENCIA_RAMR.search(texto)
+    doc_vigencia = f"{m_vigencia.group(1)} A {m_vigencia.group(2)}" if m_vigencia else None
+    linhas.append(linha_tabela(
+        "Vigência", f"{fonte_vigencia} (BD)" if fonte_vigencia else "contrato não encontrado no banco", bool(fonte_vigencia),
+        doc_vigencia or "não encontrada no documento", bool(doc_vigencia),
+        (fonte_vigencia == doc_vigencia) if fonte_vigencia and doc_vigencia else None,
+    ))
+
+    (fonte_comp_texto, fonte_comp_disp), competencia_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "competencia")
+    doc_comp_bruto, doc_comp = _extrair_competencia_ramr(texto)
+    linhas.append(linha_tabela(
+        "Competência", fonte_comp_texto, fonte_comp_disp,
+        exibir_competencia(doc_comp_bruto, doc_comp) or "não encontrada no documento", bool(doc_comp_bruto),
+        (competencia_ref == doc_comp) if competencia_ref and doc_comp else None,
+    ))
+
+    fonte_periodo = calcular_periodo(competencia_ref) if competencia_ref else None
+    m_periodo = RE_PERIODO_RAMR.search(texto)
+    doc_periodo = f"{m_periodo.group(1)} a {m_periodo.group(2)}" if m_periodo else None
+    linhas.append(linha_tabela(
+        "Período",
+        f"{fonte_periodo} (calculado c/ base na competência)" if fonte_periodo else "depende da competência", bool(fonte_periodo),
+        doc_periodo or "não encontrado no documento", bool(doc_periodo),
+        (fonte_periodo == doc_periodo) if fonte_periodo and doc_periodo else None,
+    ))
+
+    return montar_tabela(nome_arquivo, "Relatório de Avaliação e Medição dos Resultados", indice + 1, linhas)
+
+# ------- Documento 5: Termo Circunstanciado do Gestor do Contrato -------
+
+# mesmo estilo de rótulo em CAIXA ALTA do RAMR (linha própria por valor), mas SEM a duplicação de
+# linha da camada de acessibilidade (confirmado no euro.pdf - só remover_duplicatas_consecutivas()
+# não muda nada aqui, mas não faz mal chamar mesmo assim, por consistência com os outros)
+RE_PERIODO_TERMO = re.compile(r"PER[ÍI]ODO DE AVALIA[ÇC][ÃA]O:\s*\n?\s*(\d{2}/\d{2}/\d{4})\s*a\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
+RE_CONTRATADA_TERMO = re.compile(r"CONTRATADA:\s*\n?\s*(.+?)\s*\n\s*CNPJ:", re.IGNORECASE)
+RE_CNPJ_TERMO = re.compile(r"CNPJ:\s*\n?\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", re.IGNORECASE)
+RE_OBJETO_TERMO = re.compile(r"OBJETO:\s*\n?\s*(.+?)\s*\n\s*N[ºo°] DO CONTRATO:", re.IGNORECASE)
+RE_CONTRATO_TERMO = re.compile(r"N[ºo°] DO CONTRATO:\s*\n?\s*([\d./]+)", re.IGNORECASE)
+RE_VIGENCIA_TERMO = re.compile(r"VIG[ÊE]NCIA:\s*\n?\s*(\d{2}/\d{2}/\d{4})\s*a\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
+RE_PROCESSO_EMPENHO_TERMO = re.compile(r"PROCESSO ANUAL DE EMPENHO:\s*\n?\s*([\d.\-]+)", re.IGNORECASE)
+# campos do PARECER DO GESTOR DO CONTRATO, no fim do documento - únicas menções a valor/competência
+RE_VALOR_TERMO = re.compile(r"no valor de\s*R\$\s*([\d.,]+)", re.IGNORECASE)
+RE_COMPETENCIA_TERMO = re.compile(r"referente\s*[àa]\s*competência\s*([A-Za-zçÇãÃéÉêÊúÚ]+)\s*/\s*(\d{4})", re.IGNORECASE)
+
+def processar_termo_circunstanciado(nome_arquivo, paginas, contrato):
+    # mesmo raciocínio de "usar a última ocorrência" dos outros 4 processadores (ver
+    # processar_relatorio_avaliacao_medicao) - esse termo também pode ser refeito
+    indices = [i for i, t in enumerate(paginas) if "TERMO CIRCUNSTANCIADO DO GESTOR DO CONTRATO" in t]
+    if not indices:
+        return None
+    indice = indices[-1]
+    # PARECER DO GESTOR DO CONTRATO (valor/competência) fica na página seguinte à do título
+    texto_bruto = paginas[indice] + ("\n" + paginas[indice + 1] if indice + 1 < len(paginas) else "")
+    texto = remover_duplicatas_consecutivas(texto_bruto)
+
+    linhas = []
+
+    m_contratada = RE_CONTRATADA_TERMO.search(texto)
+    doc_contratada = limpar_espacos(m_contratada.group(1)) if m_contratada else None
+    fonte_contratada = contrato["nome_contratada"] if contrato else None
+    linhas.append(linha_tabela(
+        "Contratada", f"{fonte_contratada} (BD)" if fonte_contratada else "contrato não encontrado no banco", bool(fonte_contratada),
+        doc_contratada or "não encontrado no documento", bool(doc_contratada),
+        comparar_textos(fonte_contratada, doc_contratada) if fonte_contratada and doc_contratada else None,
+    ))
+
+    m_cnpj = RE_CNPJ_TERMO.search(texto)
+    doc_cnpj = m_cnpj.group(1) if m_cnpj else None
+    fonte_cnpj = contrato["cnpj"] if contrato else None
+    fonte_cnpj_fmt = _formatar_cnpj(fonte_cnpj) if fonte_cnpj else None
+    linhas.append(linha_tabela(
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        doc_cnpj or "não encontrado no documento", bool(doc_cnpj),
+        comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
+    ))
+
+    m_objeto = RE_OBJETO_TERMO.search(texto)
+    doc_objeto = limpar_espacos(m_objeto.group(1)) if m_objeto else None
+    fonte_objeto = contrato["objeto"] if contrato else None
+    linhas.append(linha_tabela(
+        "Objeto",
+        f"{fonte_objeto} (BD)" if fonte_objeto else ("objeto não cadastrado no banco" if contrato else "contrato não encontrado no banco"),
+        bool(fonte_objeto),
+        doc_objeto or "não encontrado no documento", bool(doc_objeto),
+        comparar_textos(fonte_objeto, doc_objeto) if fonte_objeto and doc_objeto else None,
+    ))
+
+    m_contrato_doc = RE_CONTRATO_TERMO.search(texto)
+    doc_contrato = m_contrato_doc.group(1) if m_contrato_doc else None
+    fonte_contrato = contrato["numero_contrato"] if contrato else None
+    linhas.append(linha_tabela(
+        "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
+        doc_contrato or "não encontrado no documento", bool(doc_contrato),
+        comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
+    ))
+
+    fonte_vigencia = None
+    if contrato and contrato.get("vigencia_inicio") and contrato.get("vigencia_fim"):
+        fonte_vigencia = f"{_formatar_data_iso(contrato['vigencia_inicio'])} a {_formatar_data_iso(contrato['vigencia_fim'])}"
+    m_vigencia = RE_VIGENCIA_TERMO.search(texto)
+    doc_vigencia = f"{m_vigencia.group(1)} a {m_vigencia.group(2)}" if m_vigencia else None
+    linhas.append(linha_tabela(
+        "Vigência", f"{fonte_vigencia} (BD)" if fonte_vigencia else "contrato não encontrado no banco", bool(fonte_vigencia),
+        doc_vigencia or "não encontrada no documento", bool(doc_vigencia),
+        (fonte_vigencia == doc_vigencia) if fonte_vigencia and doc_vigencia else None,
+    ))
+
+    m_processo_empenho = RE_PROCESSO_EMPENHO_TERMO.search(texto)
+    doc_processo_empenho = m_processo_empenho.group(1) if m_processo_empenho else None
+    fonte_processo_empenho = contrato["processo_empenho_anual"] if contrato else None
+    linhas.append(linha_tabela(
+        "Processo Anual de Empenho",
+        f"{fonte_processo_empenho} (BD)" if fonte_processo_empenho else ("não cadastrado no banco" if contrato else "contrato não encontrado no banco"),
+        bool(fonte_processo_empenho),
+        doc_processo_empenho or "não encontrado no documento", bool(doc_processo_empenho),
+        comparar_textos(fonte_processo_empenho, doc_processo_empenho) if fonte_processo_empenho and doc_processo_empenho else None,
+    ))
+
+    # Competência e Valor NÃO entram na conferência aqui - não há fonte segura pra eles: é o
+    # próprio PARECER DO GESTOR DO CONTRATO (dentro deste documento) que os determina, e ele passa
+    # a ser a fonte segura usada pelos OUTROS documentos do processo (ver obter_dados_parecer /
+    # _fonte_autorizacao_ou_nf) e pela conferência da própria NF (ver processar_nota_fiscal).
+    # Mostrados aqui só como observação, em destaque, pra quem olha esse bloco já ver os valores
+    # que valem pro resto do processo.
+    m_competencia = RE_COMPETENCIA_TERMO.search(texto)
+    doc_comp = f"{_MESES_NOME[_mes_para_numero(m_competencia.group(1))]}/{m_competencia.group(2)}" \
+        if m_competencia and _mes_para_numero(m_competencia.group(1)) else None
+    m_valor_doc = RE_VALOR_TERMO.search(texto)
+    doc_valor = m_valor_doc.group(1) if m_valor_doc else None
+    observacao = f"Competência: {doc_comp or 'não encontrada no documento'} | Valor: {doc_valor or 'não encontrado no documento'}"
+
+    fonte_periodo = calcular_periodo(doc_comp) if doc_comp else None
+    m_periodo = RE_PERIODO_TERMO.search(texto)
+    doc_periodo = f"{m_periodo.group(1)} a {m_periodo.group(2)}" if m_periodo else None
+    linhas.append(linha_tabela(
+        "Período",
+        f"{fonte_periodo} (calculado c/ base na competência)" if fonte_periodo else "depende da competência", bool(fonte_periodo),
+        doc_periodo or "não encontrado no documento", bool(doc_periodo),
+        (fonte_periodo == doc_periodo) if fonte_periodo and doc_periodo else None,
+    ))
+
+    return montar_tabela(nome_arquivo, "Termo Circunstanciado do Gestor do Contrato", indice + 1, linhas, observacao)
+
+# ------- Documento 6: Nota Fiscal (conferida contra o PARECER do Termo Circunstanciado) -------
+
+def obter_dados_parecer(paginas):
+    # o PARECER DO GESTOR DO CONTRATO (dentro do Termo Circunstanciado - ver
+    # processar_termo_circunstanciado) é a autorização pra emissão da própria NF: quando existe,
+    # Valor e Competência nele valem MAIS que a NF nesses 2 campos em qualquer documento do
+    # processo (a NF que deve bater com o que foi autorizado, não o contrário) - ver
+    # _fonte_autorizacao_ou_nf(). Devolve None se não há Termo Circunstanciado no processo, ou se
+    # não achou nem valor nem competência nele.
+    indices = [i for i, t in enumerate(paginas) if "TERMO CIRCUNSTANCIADO DO GESTOR DO CONTRATO" in t]
+    if not indices:
+        return None
+    indice = indices[-1]
+    # PARECER fica sempre na página seguinte à do título do Termo (mesma particularidade do RAMR)
+    texto_bruto = paginas[indice] + ("\n" + paginas[indice + 1] if indice + 1 < len(paginas) else "")
+    texto = remover_duplicatas_consecutivas(texto_bruto)
+
+    m_valor = RE_VALOR_TERMO.search(texto)
+    m_comp = RE_COMPETENCIA_TERMO.search(texto)
+    if not m_valor and not m_comp:
+        return None
+
+    competencia = None
+    if m_comp:
+        numero_mes = _mes_para_numero(m_comp.group(1))
+        if numero_mes:
+            competencia = f"{_MESES_NOME[numero_mes]}/{m_comp.group(2)}"
+
+    return {
+        "pagina": indice + 2,
+        "valor": m_valor.group(1) if m_valor else None,
+        "competencia": competencia,
+    }
+
+def processar_nota_fiscal(nome_arquivo, dados_nf, dados_parecer, contrato):
+    # só existe um bloco de conferência da NF quando há Termo Circunstanciado no processo - sem
+    # ele, a própria NF já É a fonte segura usada por todos os outros documentos (não faz sentido
+    # comparar a NF contra ela mesma)
+    if not dados_parecer:
+        return None
+
+    pagina = dados_nf["paginas"][0] if dados_nf and dados_nf["paginas"] else dados_parecer["pagina"]
+
+    linhas = []
+
+    fonte_cnpj = contrato["cnpj"] if contrato else None
+    fonte_cnpj_fmt = _formatar_cnpj(fonte_cnpj) if fonte_cnpj else None
+    doc_cnpj = dados_nf.get("cnpj") if dados_nf else None
+    linhas.append(linha_tabela(
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        doc_cnpj or "não encontrado na NF", bool(doc_cnpj),
+        comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
+    ))
+
+    fonte_comp = dados_parecer.get("competencia")
+    doc_comp = dados_nf["competencia"] if dados_nf else None
+    linhas.append(linha_tabela(
+        "Competência",
+        f"{fonte_comp} (Gestor do Contrato pág. {dados_parecer['pagina']})" if fonte_comp else "não encontrada no Termo", bool(fonte_comp),
+        doc_comp or "não encontrada na NF", bool(doc_comp),
+        (fonte_comp == doc_comp) if fonte_comp and doc_comp else None,
+    ))
+
+    fonte_valor = dados_parecer.get("valor")
+    doc_valor = dados_nf["valor"] if dados_nf else None
+    linhas.append(linha_tabela(
+        "Valor Bruto",
+        f"{fonte_valor} (Gestor do Contrato pág. {dados_parecer['pagina']})" if fonte_valor else "não encontrado no Termo", bool(fonte_valor),
+        doc_valor or "não encontrado na NF", bool(doc_valor),
+        comparar_numeros(fonte_valor, doc_valor) if fonte_valor and doc_valor else None,
+    ))
+
+    # Contrato e Domicílio Bancário só entram na conferência quando a própria NF cita esses dados -
+    # nem todo modelo de NFS-e traz isso na "Descrição do Serviço" (ver RE_CONTRATO_NF/RE_DADOS_BANCARIOS_NF)
+    doc_contrato_nf = dados_nf.get("contrato") if dados_nf else None
+    if doc_contrato_nf:
+        fonte_contrato = contrato["numero_contrato"] if contrato else None
+        linhas.append(linha_tabela(
+            "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
+            doc_contrato_nf, True,
+            comparar_numeros(fonte_contrato, doc_contrato_nf) if fonte_contrato else None,
+        ))
+
+    doc_agencia_nf = dados_nf.get("agencia") if dados_nf else None
+    doc_conta_nf = dados_nf.get("conta") if dados_nf else None
+    if doc_agencia_nf and doc_conta_nf:
+        fonte_banco = contrato["banco"] if contrato else None
+        fonte_agencia = contrato["agencia"] if contrato else None
+        fonte_conta = contrato["conta"] if contrato else None
+        tem_fonte = bool(fonte_agencia and fonte_conta)
+        fonte_texto = (f"{fonte_banco or '-'} | Ag {fonte_agencia} | C/c {fonte_conta} (BD)" if tem_fonte
+                       else ("dados bancários não cadastrados no banco" if contrato else "contrato não encontrado no banco"))
+        doc_texto = f"{dados_nf.get('banco') or '-'} | Ag {doc_agencia_nf} | C/c {doc_conta_nf}"
+        bate_domicilio = (comparar_numeros(fonte_agencia, doc_agencia_nf) and comparar_numeros(fonte_conta, doc_conta_nf)) if tem_fonte else None
+        linhas.append(linha_tabela("Domicílio Bancário", fonte_texto, tem_fonte, doc_texto, True, bate_domicilio))
+
+    valor_liquido = dados_nf.get("valor_liquido") if dados_nf else None
+    observacao = f"Valor líquido: {valor_liquido or 'não encontrado na NF'}"
+
+    return montar_tabela(nome_arquivo, "Nota Fiscal", pagina, linhas, observacao)
 
 # ------- helpers pequenos -------
 
@@ -481,11 +850,31 @@ def _fonte_nf(dados_nf, campo):
         return ("NF não identificada", False)
     return (f"{dados_nf[campo]} ({pagina_nf_str(dados_nf)})", True)
 
+def _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, campo):
+    # campo: "valor" ou "competencia" - o PARECER do Termo Circunstanciado (ver
+    # obter_dados_parecer) tem prioridade sobre a NF nesses 2 campos, quando disponível no
+    # processo. Devolve ((fonte_texto, fonte_disponivel), valor_bruto) - valor_bruto é o que entra
+    # nas comparações de igualdade contra o que está escrito em cada documento
+    if dados_parecer and dados_parecer.get(campo):
+        valor = dados_parecer[campo]
+        return (f"{valor} (Gestor do Contrato pág. {dados_parecer['pagina']})", True), valor
+    fonte_texto, disponivel = _fonte_nf(dados_nf, campo)
+    valor = dados_nf[campo] if dados_nf and dados_nf.get(campo) else None
+    return (fonte_texto, disponivel), valor
+
 def _formatar_cnpj(digitos):
     digitos = re.sub(r"\D", "", digitos or "")
     if len(digitos) != 14:
         return digitos
     return f"{digitos[0:2]}.{digitos[2:5]}.{digitos[5:8]}/{digitos[8:12]}-{digitos[12:14]}"
+
+def _formatar_data_iso(iso):
+    # "2024-04-30" (formato salvo no banco, vindo do <input type="date"> de cadastrar_contrato.py) -> "30/04/2024"
+    partes = (iso or "").split("-")
+    if len(partes) != 3:
+        return None
+    ano, mes, dia = partes
+    return f"{dia}/{mes}/{ano}"
 
 # ------- ponto de entrada -------
 
@@ -498,12 +887,16 @@ def gerar_conformidade(nome_arquivo, paginas):
 
     contrato = localizar_contrato(paginas)
     dados_nf = obter_dados_nf(paginas)
+    dados_parecer = obter_dados_parecer(paginas)
 
     tabelas = []
     for funcao in (
-        lambda: processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, contrato, dados_nf),
-        lambda: processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf),
-        lambda: processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato, dados_nf),
+        lambda: processar_relatorio_avaliacao_medicao(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer),
+        lambda: processar_termo_circunstanciado(nome_arquivo, paginas, contrato),
+        lambda: processar_nota_fiscal(nome_arquivo, dados_nf, dados_parecer, contrato),
+        lambda: processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer),
+        lambda: processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf, dados_parecer),
+        lambda: processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer),
     ):
         tabela = funcao()
         if tabela:
@@ -520,7 +913,7 @@ def coletar_fontes_pdf():
         options.debugger_address = "127.0.0.1:9222"
         navegador = webdriver.Chrome(options=options)
     except WebDriverException:
-        aviso = "Abas do Chrome com PDFs abertos não encontradas, processando só os PDFs baixados."
+        aviso = "Abas do Chrome com PDFs abertos não encontradas, analisados só os PDFs baixados."
         navegador = None
 
     fontes = []
@@ -575,7 +968,7 @@ HTML_CONFORMIDADE = r"""
 <html lang="pt-br">
 <head>
 <meta charset="utf-8">
-<title>Dacumentos analisados pela Conformidade</title>
+<title>CCRGCI - Resultado da Conformidade</title>
 <style>
   :root {
     --mist: #f2f5f3;
@@ -584,10 +977,10 @@ HTML_CONFORMIDADE = r"""
     --ink: #16201b;
     --ink-soft: #56625b;
     --ink-faint: #8a958e;
-    --pine: #45a37e;
-    --pine-deep: #35815f;
-    --pine-tint: #e6f3ec;
-    --pine-tint-strong: #cfe9db;
+    --pine: #178c4e;
+    --pine-deep: #0f6b3b;
+    --pine-tint: #e2f5ea;
+    --pine-tint-strong: #c3ecd6;
     --status-error: #d1453d;
     --status-error-tint: #fbe9e8;
     --shadow-1: 0 1px 2px rgba(20,32,27,0.07), 0 1px 1px rgba(20,32,27,0.05);
@@ -603,8 +996,18 @@ HTML_CONFORMIDADE = r"""
 
   .pagina { max-width: 980px; margin: 0 auto; padding: 22px 26px 40px; }
 
-  .cabecalho { margin-bottom: 16px; }
+  .cabecalho { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
   h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
+  .subtitulo { margin: 2px 0 0; color: var(--ink-soft); font-size: 12.5px; }
+
+  .marca-icone {
+    width: 34px; height: 34px; border-radius: 8px;
+    background: var(--pine);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: var(--shadow-1); flex: 0 0 auto;
+  }
+  .marca-icone svg { width: 19px; height: 19px; }
 
   .aviso {
     display: flex; align-items: center; gap: 8px;
@@ -624,17 +1027,18 @@ HTML_CONFORMIDADE = r"""
   .arquivo__titulo svg { flex: 0 0 auto; color: var(--pine-deep); }
 
   .painel {
-    border: 1px solid var(--hairline); border-radius: 10px; background: var(--cloud);
+    border: 1px solid var(--hairline); border-radius: 10px; background: var(--pine-tint);
     box-shadow: var(--shadow-1); padding: 14px 16px; margin-bottom: 14px;
   }
-  .painel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; display: flex; align-items: baseline; gap: 6px; }
+  .painel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--pine-deep); display: flex; align-items: baseline; gap: 6px; }
   .painel h2 .pagina-doc { font-weight: 400; color: var(--ink-faint); font-size: 12px; }
+  .observacao { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--pine-tint-strong); font-size: 12.5px; font-weight: 600; color: var(--status-error); }
 
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px 10px; font-size: 12.5px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
-  th { color: var(--pine); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.02em; }
+  th { color: var(--ink-soft); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.02em; }
   tr:last-child td { border-bottom: none; }
-  td.campo { font-weight: 600; white-space: nowrap; }
+  td.campo { font-weight: 400; white-space: nowrap; }
   td.resultado { text-align: center; width: 40px; }
 
   .valor { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
@@ -649,6 +1053,13 @@ HTML_CONFORMIDADE = r"""
 <body>
 
 <div class="pagina">
+  <div class="cabecalho">
+    <div class="marca-icone"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></div>
+    <div>
+      <h1>Resultado da Conformidade</h1>
+      <p class="subtitulo">Documentos preenchidos x Fontes seguras (NF e BD).</p>
+    </div>
+  </div>
   <div id="conteudo"></div>
 </div>
 
@@ -687,10 +1098,12 @@ HTML_CONFORMIDADE = r"""
   }
 
   function montarPainelDocumento(bloco) {
+    const observacao = bloco.observacao ? `<p class="observacao">${bloco.observacao}</p>` : "";
     return `
       <div class="painel">
         <h2>${bloco.documento} <span class="pagina-doc">pág. ${bloco.pagina}</span></h2>
         ${montarTabelaLinhas(bloco.linhas)}
+        ${observacao}
       </div>
     `;
   }
@@ -744,7 +1157,7 @@ def abrir_janela(blocos, aviso):
     # cria a janela em cima da instância de webview já em execução (a principal do gui.py) -
     # os dados já foram calculados antes de chamar essa função, a janela só renderiza
     webview.create_window(
-        "Resultado da Conformidade", html=HTML_CONFORMIDADE,
+        "CCRGCI - Resultado da Conformidade (NS)", html=HTML_CONFORMIDADE,
         js_api=ApiConformidade(blocos, aviso), width=1040, height=780,
     )
 
@@ -754,7 +1167,7 @@ def main(nome_planilha=None):
     blocos, aviso = rodar_conferencia()
     if aviso:
         print(aviso)
-    print("Resultado da Conformidade:")
+    print("Resultado da Conformidade (NS):")
     if not blocos:
         print("Nenhum documento de para conferência encontrado nos PDFs disponíveis.")
     else:
