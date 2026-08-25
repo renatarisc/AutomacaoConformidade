@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS contratos (
     nome_contratada TEXT NOT NULL,
     nome_planilha_controle TEXT,
     cnpj TEXT,
-    objeto TEXT,
+    objeto_resumido TEXT,
+    objeto_detalhado TEXT,
     numero_pregao TEXT,
     numero_contrato TEXT,
     vigencia_inicio TEXT,
@@ -140,6 +141,11 @@ def _migrar_esquema(conexao):
         conexao.execute("ALTER TABLE contratos RENAME COLUMN processo_empenho TO processo_empenho_anual")
     if "situacao" not in colunas_contratos:
         conexao.execute("ALTER TABLE contratos ADD COLUMN situacao TEXT NOT NULL DEFAULT 'vigente'")
+    if "objeto" in colunas_contratos and "objeto_resumido" not in colunas_contratos:
+        conexao.execute("ALTER TABLE contratos RENAME COLUMN objeto TO objeto_resumido")
+    colunas_contratos = {linha["name"] for linha in conexao.execute("PRAGMA table_info(contratos)")}
+    if "objeto_detalhado" not in colunas_contratos:
+        conexao.execute("ALTER TABLE contratos ADD COLUMN objeto_detalhado TEXT")
 
     colunas_empenhos = {linha["name"] for linha in conexao.execute("PRAGMA table_info(contrato_empenhos)")}
     if "natureza_despesa" not in colunas_empenhos:
@@ -361,7 +367,8 @@ def obter_contrato(contrato_id):
         return contrato
 
 _COLUNAS_CONTRATO = (
-    "tipo_contrato", "situacao", "nome_contratada", "nome_planilha_controle", "cnpj", "objeto",
+    "tipo_contrato", "situacao", "nome_contratada", "nome_planilha_controle", "cnpj",
+    "objeto_resumido", "objeto_detalhado",
     "numero_pregao", "numero_contrato", "vigencia_inicio", "vigencia_fim",
     "processo_contratacao", "processo_empenho_anual", "banco", "agencia", "conta",
     "iss_incide", "iss_aliquota", "previdenciaria_incide", "previdenciaria_aliquota",

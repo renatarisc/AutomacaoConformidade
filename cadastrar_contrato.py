@@ -295,8 +295,15 @@ HTML_CONTRATO = r"""
 
         <div class="linha-campos">
           <div class="campo campo--flexivel">
-            <label>Objeto</label>
-            <textarea id="campo-objeto"></textarea>
+            <label>Objeto Resumido</label>
+            <textarea id="campo-objeto_resumido"></textarea>
+          </div>
+        </div>
+
+        <div class="linha-campos">
+          <div class="campo campo--flexivel">
+            <label>Objeto Detalhado</label>
+            <textarea id="campo-objeto_detalhado"></textarea>
           </div>
         </div>
       </div>
@@ -558,7 +565,8 @@ HTML_CONTRATO = r"""
             ${linhaVisualizacao("Processo de contratação", contrato.processo_contratacao)}
             ${ehServico ? linhaVisualizacao("Processo de empenho anual", contrato.processo_empenho_anual) : ""}
             <div></div>
-            <div class="campo campo--largo">${linhaVisualizacao("Objeto", contrato.objeto)}</div>
+            <div class="campo campo--largo">${linhaVisualizacao("Objeto Resumido", contrato.objeto_resumido)}</div>
+            <div class="campo campo--largo">${linhaVisualizacao("Objeto Detalhado", contrato.objeto_detalhado)}</div>
           </div>
         </div>
 
@@ -830,7 +838,8 @@ HTML_CONTRATO = r"""
     document.getElementById("campo-nome_contratada").value = contrato.nome_contratada || "";
     document.getElementById("campo-nome_planilha_controle").value = contrato.nome_planilha_controle || "";
     document.getElementById("campo-cnpj").value = formatarCnpj(contrato.cnpj || "");
-    document.getElementById("campo-objeto").value = contrato.objeto || "";
+    document.getElementById("campo-objeto_resumido").value = contrato.objeto_resumido || "";
+    document.getElementById("campo-objeto_detalhado").value = contrato.objeto_detalhado || "";
     document.getElementById("campo-numero_pregao").value = contrato.numero_pregao || "";
     document.getElementById("campo-numero_contrato").value = contrato.numero_contrato || "";
     document.getElementById("campo-vigencia_inicio").value = contrato.vigencia_inicio || "";
@@ -907,7 +916,8 @@ HTML_CONTRATO = r"""
       nome_contratada: document.getElementById("campo-nome_contratada").value,
       nome_planilha_controle: document.getElementById("campo-nome_planilha_controle").value,
       cnpj: document.getElementById("campo-cnpj").value.replace(/\D/g, ""),
-      objeto: document.getElementById("campo-objeto").value,
+      objeto_resumido: document.getElementById("campo-objeto_resumido").value,
+      objeto_detalhado: document.getElementById("campo-objeto_detalhado").value,
       numero_pregao: document.getElementById("campo-numero_pregao").value,
       numero_contrato: document.getElementById("campo-numero_contrato").value,
       vigencia_inicio: document.getElementById("campo-vigencia_inicio").value,

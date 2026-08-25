@@ -442,6 +442,7 @@ HTML_INTERFACE = r"""
   }
 
   .console:empty::before { content: "Nenhuma automação em execução."; color: var(--ink-faint); opacity: 0.55; }
+  .console.executando:empty::before { content: "Executando... aguarde a primeira mensagem aparecer aqui."; }
 </style>
 </head>
 <body>
@@ -533,6 +534,7 @@ HTML_INTERFACE = r"""
 
   function definirExecutando(executando) {
     document.querySelectorAll(".card__acao").forEach((botao) => { botao.disabled = executando; });
+    document.getElementById("console").classList.toggle("executando", executando);
   }
 
   async function executarScript(arquivo) {

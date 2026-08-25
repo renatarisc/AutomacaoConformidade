@@ -29,6 +29,10 @@ _MARCADORES_PAGINA_NF = (
     "DANFSe",
     "NOTA FISCAL DE SERVIÇOS ELETRÔNICA",
     "NOTA FISCAL DE SERVICOS ELETRONICA",
+    "NOTA FISCAL DE SERVIÇOS ELETRÓNICA",  # variante com "Ó" (agudo) em vez de "Ô" (circunflexo) -
+                                            # é como o Tesseract OCR lê esse acento nesse tipo de
+                                            # NF (ex: modelo "Nota Salvador", digitalizada sem
+                                            # camada de texto - ver conformidade.py/_extrair_texto_ocr)
     "DANFE",
 )
 

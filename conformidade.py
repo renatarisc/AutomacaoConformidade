@@ -1,7 +1,12 @@
 import calendar
+import io
+import os
 import re
+import threading
 
+import pytesseract
 import webview  # mesma lib do gui.py - abre a janela de resultado em cima da instância já em execução
+from PIL import Image
 from pypdf import PdfReader
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
@@ -11,6 +16,14 @@ import pdf_aberto_windows
 import preencher_planilha_ns as ns  # reaproveita localizar_texto_nf, RE_NUMERO_NF, RE_EMPRESA,
                                      # extrair_data_emissao_nf, extrair_competencia_nf, juntar_com_e -
                                      # já testados/validados nesse módulo, não duplica aqui
+
+# alguns documentos digitalizados dentro do processo (ex: Consulta Optante pelo Simples Nacional -
+# print de tela da Receita Federal) não têm camada de texto, só a imagem - o caminho padrão do
+# instalador do Tesseract no Windows; se não existir aqui, mantém o padrão do pytesseract (assume
+# que está no PATH)
+_TESSERACT_PADRAO = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+if os.path.exists(_TESSERACT_PADRAO):
+    pytesseract.pytesseract.tesseract_cmd = _TESSERACT_PADRAO
 
 # ------- utilidades de texto -------
 
@@ -187,6 +200,176 @@ def pagina_nf_str(dados_nf):
         return ""
     return f"NF pág. {ns.juntar_com_e(dados_nf['paginas'])}"
 
+# janela de digitação manual (ver solicitar_dados_manuais_nf) - só os campos passados em
+# {campos_html} aparecem; mesmos tokens de cor do resto do projeto
+HTML_DIGITACAO_NF = r"""
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<title>CCRGCI - Dados da NF não identificados</title>
+<style>
+  :root {{
+    --mist: #f2f5f3; --cloud: #ffffff; --hairline: #dde4e0;
+    --ink: #16201b; --ink-soft: #56625b; --ink-faint: #8a958e;
+    --pine: #178c4e; --pine-deep: #0f6b3b; --pine-tint: #e2f5ea; --pine-tint-strong: #c3ecd6;
+    --status-error: #d1453d; --status-error-tint: #fbe9e8;
+    --shadow-1: 0 1px 2px rgba(20,32,27,0.07), 0 1px 1px rgba(20,32,27,0.05);
+  }}
+  * {{ box-sizing: border-box; }}
+  html, body {{
+    margin: 0; height: 100%; background: var(--mist); color: var(--ink);
+    font-family: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    font-size: 13.5px;
+  }}
+  .pagina {{ padding: 20px 22px; }}
+  .cabecalho {{ display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }}
+  .marca-icone {{
+    width: 34px; height: 34px; border-radius: 8px; background: var(--status-error); color: #fff;
+    display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow-1); flex: 0 0 auto;
+  }}
+  h1 {{ margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }}
+  .subtitulo {{ margin: 3px 0 0; color: var(--ink-soft); font-size: 12px; line-height: 1.5; }}
+  .campo {{ display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }}
+  label {{ font-size: 11.5px; font-weight: 600; color: var(--ink-soft); }}
+  input {{
+    font-family: inherit; font-size: 13px; padding: 7px 9px;
+    border: 1px solid var(--hairline); border-radius: 6px; background: var(--cloud); color: var(--ink);
+  }}
+  input:focus-visible {{ outline: none; border-color: var(--pine); box-shadow: 0 0 0 3px var(--pine-tint-strong); }}
+  .rodape {{ display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }}
+  .btn {{
+    font-family: inherit; font-size: 12.5px; font-weight: 600; border: 1px solid transparent;
+    border-radius: 6px; padding: 7px 16px; cursor: pointer; white-space: nowrap;
+  }}
+  .btn--outline {{ background: var(--cloud); border-color: var(--hairline); color: var(--ink); }}
+  .btn--outline:hover {{ border-color: var(--pine); color: var(--pine-deep); }}
+  .btn--acento {{ background: var(--pine); color: #fff; }}
+  .btn--acento:hover {{ background: var(--pine-deep); }}
+</style>
+</head>
+<body>
+<div class="pagina">
+  <div class="cabecalho">
+    <div class="marca-icone"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><circle cx="12" cy="16.5" r="0.5" fill="currentColor"/><path d="M10.3 4.6 2.9 18a1.5 1.5 0 0 0 1.3 2.2h15.6a1.5 1.5 0 0 0 1.3-2.2L13.7 4.6a1.6 1.6 0 0 0-2.8 0Z"/></svg></div>
+    <div>
+      <h1>Dados da NF não identificados</h1>
+      <p class="subtitulo">{mensagem}</p>
+    </div>
+  </div>
+  <form id="form-nf">
+    {campos_html}
+    <div class="rodape">
+      <button type="button" class="btn btn--outline" id="botao-pular">Continuar sem preencher</button>
+      <button type="submit" class="btn btn--acento">Salvar e continuar</button>
+    </div>
+  </form>
+</div>
+<script>
+  function formatarDataBr(iso) {{
+    if (!iso) return "";
+    const [ano, mes, dia] = iso.split("-");
+    return `${{dia}}/${{mes}}/${{ano}}`;
+  }}
+
+  async function concluir(dados) {{
+    await window.pywebview.api.enviar(dados);
+  }}
+
+  document.getElementById("form-nf").addEventListener("submit", (evento) => {{
+    evento.preventDefault();
+    const dados = {{}};
+    const campoEmissao = document.getElementById("campo-emissao");
+    const campoCompetencia = document.getElementById("campo-competencia");
+    const campoValor = document.getElementById("campo-valor");
+    if (campoEmissao) dados.emissao = formatarDataBr(campoEmissao.value);
+    if (campoCompetencia) dados.competencia = campoCompetencia.value.trim();
+    if (campoValor) dados.valor = campoValor.value.trim();
+    concluir(dados);
+  }});
+
+  document.getElementById("botao-pular").addEventListener("click", () => concluir({{}}));
+</script>
+</body>
+</html>
+"""
+
+def _abrir_pdf_na_pagina(caminho_pdf, pagina):
+    # só funciona quando a fonte é um PDF baixado localmente (nome_arquivo é um caminho de
+    # arquivo de verdade) - quando a fonte é uma aba do Chrome (nome_arquivo é a URL do Suap), não
+    # existe um arquivo separado pra abrir, então nem tenta. O fragmento "#page=N" é respeitado
+    # pelo visualizador de PDF embutido do Edge/Chrome (o padrão de PDF no Windows)
+    if not caminho_pdf or not os.path.isfile(caminho_pdf):
+        return False
+    caminho_url = caminho_pdf.replace("\\", "/")
+    try:
+        os.startfile(f"file:///{caminho_url}#page={pagina}")
+        return True
+    except OSError:
+        return False
+
+def solicitar_dados_manuais_nf(nome_arquivo, dados_nf):
+    # a NF foi localizada (dados_nf existe - ver obter_dados_nf) mas Emissão/Competência/Valor
+    # podem ter vindo vazios - acontece quando o modelo de NF é diferente do testado (rótulos
+    # diferentes, layout em colunas que atrapalha o OCR - ver _extrair_texto_ocr, caso real do
+    # prevelar.pdf) ou o texto simplesmente não deu pra extrair. Em vez de deixar "indefinido" no
+    # resto da conferência, abre uma janela ANTES de fechar o processamento pedindo pra digitar
+    # manualmente só esses 3 campos (não pede CNPJ - pedido explícito do usuário 2026-08-24),
+    # tentando abrir o PDF já na página certa (ver _abrir_pdf_na_pagina). Bloqueia (thread em
+    # segundo plano de rodar_conferencia() espera nessa função) até o usuário decidir por um dos
+    # botões da própria janela - fechar pelo X não conta como decisão (ver _ao_fechar).
+    if not dados_nf:
+        return
+    campos_faltando = [c for c in ("emissao", "competencia", "valor") if not dados_nf.get(c)]
+    if not campos_faltando:
+        return
+
+    campos_form = {
+        "emissao": '<div class="campo"><label>Data de Emissão</label><input type="date" id="campo-emissao"></div>',
+        "competencia": '<div class="campo"><label>Competência</label><input id="campo-competencia" placeholder="Ex: Junho/2026"></div>',
+        "valor": '<div class="campo"><label>Valor do Serviço (R$)</label><input id="campo-valor" placeholder="Ex: 7.130,22"></div>',
+    }
+    campos_html = "\n    ".join(campos_form[campo] for campo in campos_faltando)
+
+    pagina_numero = dados_nf["paginas"][0] if dados_nf["paginas"] else None
+    abriu_pdf = _abrir_pdf_na_pagina(nome_arquivo, pagina_numero) if pagina_numero else False
+    mensagem = (
+        "Preencha os campos abaixo, conforme a NF." if abriu_pdf
+        else f"{pagina_nf_str(dados_nf) or 'página não identificada'}; abra o documento e preencha os campos abaixo."
+    )
+
+    html = HTML_DIGITACAO_NF.format(mensagem=mensagem, campos_html=campos_html)
+
+    evento = threading.Event()
+    resultado = {}
+
+    class ApiDigitacaoNF:
+        def enviar(self, dados):
+            resultado.update(dados)
+            evento.set()
+
+    janela = webview.create_window(
+        "CCRGCI - Dados da NF não identificados", html=html, js_api=ApiDigitacaoNF(),
+        width=600, height=400, on_top=True,
+    )
+
+    def _ao_fechar():
+        # cancela o fechamento pelo X enquanto não decidiu por um dos botões da própria janela
+        # (retornar False no evento "closing" do pywebview veta o fechamento)
+        if not evento.is_set():
+            return False
+
+    janela.events.closing += _ao_fechar
+    evento.wait()
+    janela.destroy()  # decidiu (por um botão da própria janela) - fecha sozinha, não precisa mais dela
+
+    digitados = dados_nf.setdefault("_campos_digitados", set())
+    for campo in campos_faltando:
+        valor = resultado.get(campo)
+        if valor:
+            dados_nf[campo] = valor
+            digitados.add(campo)
+
 # ------- contrato no banco (fonte segura) -------
 
 def localizar_contrato(paginas):
@@ -207,6 +390,14 @@ def empenhos_registrados(contrato):
     for processo in contrato.get("processos_empenho", []):
         numeros.extend(e["numero_empenho"] for e in processo.get("empenhos", []))
     return numeros
+
+def naturezas_despesa_registradas(contrato):
+    # natureza_despesa é um campo por EMPENHO (não do contrato em si) - achata e tira duplicatas,
+    # preservando ordem, igual empenhos_registrados()
+    naturezas = [e.get("natureza_despesa") for e in contrato.get("empenhos", []) if e.get("natureza_despesa")]
+    for processo in contrato.get("processos_empenho", []):
+        naturezas.extend(e.get("natureza_despesa") for e in processo.get("empenhos", []) if e.get("natureza_despesa"))
+    return list(dict.fromkeys(naturezas))
 
 # ------- montagem da tabela -------
 
@@ -235,7 +426,8 @@ def montar_tabela(nome_arquivo, nome_documento, pagina, linhas, observacao=None)
 def formatar_bloco_markdown(bloco):
     # usado só pelo main()/CLI (rodar este arquivo sozinho) - a janela HTML não passa por aqui,
     # ela recebe os dicts direto e monta a tabela em HTML
-    cabecalho = f"**{bloco['arquivo']} — {bloco['documento']} (pág. {bloco['pagina']})**"
+    pagina = f" (pág. {bloco['pagina']})" if bloco["pagina"] else ""
+    cabecalho = f"**{bloco['arquivo']} — {bloco['documento']}{pagina}**"
     linhas_md = []
     for linha in bloco["linhas"]:
         fonte = f"`{linha['fonte']}`" if linha["fonte_disponivel"] else f"*({linha['fonte']})*"
@@ -390,13 +582,11 @@ def processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf, dados_p
 
     m_tipo = RE_TIPO_SERVICO.search(texto)
     doc_tipo = limpar_espacos(m_tipo.group(1)) if m_tipo else None
-    fonte_objeto = contrato["objeto"] if contrato else None
+    fonte_texto, fonte_disponivel, bate_objeto = _conferir_objeto(contrato, doc_tipo)
     linhas.append(linha_tabela(
-        "Tipo de serviço",
-        f"{fonte_objeto} (BD)" if fonte_objeto else ("objeto não cadastrado no banco" if contrato else "contrato não encontrado no banco"),
-        bool(fonte_objeto),
+        "Tipo de serviço", fonte_texto, fonte_disponivel,
         doc_tipo or "não encontrado no documento", bool(doc_tipo),
-        comparar_textos(fonte_objeto, doc_tipo) if fonte_objeto and doc_tipo else None,
+        bate_objeto,
     ))
 
     m_contrato_doc = RE_CONTRATO_GENERICO.search(texto)
@@ -517,6 +707,40 @@ def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato,
     ))
 
     return montar_tabela(nome_arquivo, "Instrumentos de Cobrança", indice + 1, linhas)
+
+# ------- Documento 7: Consulta Optante pelo Simples Nacional (Receita Federal) -------
+
+# print de tela digitalizado (sem camada de texto) - o texto usado aqui já vem do fallback de OCR
+# em _extrair_texto_ocr() (ver coletar_fontes_pdf), não do extract_text() normal do PDF
+RE_CNPJ_OPTANTE = re.compile(r"CNPJ:\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", re.IGNORECASE)
+RE_SITUACAO_SIMPLES = re.compile(r"Situa[çc][ãa]o no Simples Nacional:\s*(N[ÃA]O\s+optante|Optante)\s+pelo Simples Nacional", re.IGNORECASE)
+
+def processar_consulta_optante(nome_arquivo, paginas, contrato):
+    # identifica a página pelo conteúdo (não tem um título fixo pra buscar, é só o print da tela da
+    # Receita Federal) - "SIMPLES NACIONAL" + "SIMEI" juntos são específicos o bastante dessa consulta
+    indices = [i for i, t in enumerate(paginas) if "SIMPLES NACIONAL" in t.upper() and "SIMEI" in t.upper()]
+    if not indices:
+        return None
+    indice = indices[-1]
+    texto = paginas[indice]
+
+    linhas = []
+
+    m_cnpj = RE_CNPJ_OPTANTE.search(texto)
+    doc_cnpj = m_cnpj.group(1) if m_cnpj else None
+    fonte_cnpj = contrato["cnpj"] if contrato else None
+    fonte_cnpj_fmt = _formatar_cnpj(fonte_cnpj) if fonte_cnpj else None
+    linhas.append(linha_tabela(
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        doc_cnpj or "não encontrado no documento", bool(doc_cnpj),
+        comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
+    ))
+
+    m_situacao = RE_SITUACAO_SIMPLES.search(texto)
+    situacao = ("Não optante" if m_situacao.group(1).strip().upper().startswith("N") else "Optante") if m_situacao else None
+    observacao = situacao or "situação no Simples Nacional não encontrada no documento"
+
+    return montar_tabela(nome_arquivo, "Consulta Optante pelo Simples Nacional", indice + 1, linhas, observacao)
 
 # ------- Documento 4: Relatório de Avaliação e Medição dos Resultados (RAMR/IMR) -------
 
@@ -676,13 +900,11 @@ def processar_termo_circunstanciado(nome_arquivo, paginas, contrato):
 
     m_objeto = RE_OBJETO_TERMO.search(texto)
     doc_objeto = limpar_espacos(m_objeto.group(1)) if m_objeto else None
-    fonte_objeto = contrato["objeto"] if contrato else None
+    fonte_texto, fonte_disponivel, bate_objeto = _conferir_objeto(contrato, doc_objeto)
     linhas.append(linha_tabela(
-        "Objeto",
-        f"{fonte_objeto} (BD)" if fonte_objeto else ("objeto não cadastrado no banco" if contrato else "contrato não encontrado no banco"),
-        bool(fonte_objeto),
+        "Objeto", fonte_texto, fonte_disponivel,
         doc_objeto or "não encontrado no documento", bool(doc_objeto),
-        comparar_textos(fonte_objeto, doc_objeto) if fonte_objeto and doc_objeto else None,
+        bate_objeto,
     ))
 
     m_contrato_doc = RE_CONTRATO_TERMO.search(texto)
@@ -845,10 +1067,13 @@ def processar_nota_fiscal(nome_arquivo, dados_nf, dados_parecer, contrato):
 # ------- helpers pequenos -------
 
 def _fonte_nf(dados_nf, campo):
-    # devolve (texto, disponivel) pro padrão de linha_tabela, já com o rótulo "NF pág. X"
+    # devolve (texto, disponivel) pro padrão de linha_tabela, já com o rótulo "NF pág. X" - quando
+    # o campo veio de digitação manual (ver solicitar_dados_manuais_nf), acrescenta "- digitado"
+    # nesse rótulo, pra deixar claro que não foi extraído automaticamente do PDF
     if not dados_nf or not dados_nf.get(campo):
         return ("NF não identificada", False)
-    return (f"{dados_nf[campo]} ({pagina_nf_str(dados_nf)})", True)
+    sufixo = " - digitado" if campo in dados_nf.get("_campos_digitados", ()) else ""
+    return (f"{dados_nf[campo]} ({pagina_nf_str(dados_nf)}{sufixo})", True)
 
 def _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, campo):
     # campo: "valor" ou "competencia" - o PARECER do Termo Circunstanciado (ver
@@ -861,6 +1086,27 @@ def _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, campo):
     fonte_texto, disponivel = _fonte_nf(dados_nf, campo)
     valor = dados_nf[campo] if dados_nf and dados_nf.get(campo) else None
     return (fonte_texto, disponivel), valor
+
+def _conferir_objeto(contrato, doc_texto):
+    # o objeto do contrato virou 2 campos (objeto_resumido/objeto_detalhado - ver
+    # [[project-contratos-db-schema]]) - cada documento cita uma versão diferente (o Despacho usa a
+    # descrição detalhada, o Termo Circunstanciado usa a resumida, por exemplo) - bate se o texto
+    # do documento conferir com QUALQUER um dos dois, não precisa ser sempre o mesmo
+    fonte_resumido = contrato["objeto_resumido"] if contrato else None
+    fonte_detalhado = contrato["objeto_detalhado"] if contrato else None
+    partes = []
+    if fonte_resumido:
+        partes.append(f"Resumido: {fonte_resumido}")
+    if fonte_detalhado:
+        partes.append(f"Detalhado: {fonte_detalhado}")
+    fonte_texto = f"{' | '.join(partes)} (BD)" if partes else ("objeto não cadastrado no banco" if contrato else "contrato não encontrado no banco")
+
+    bate = None
+    if doc_texto and partes:
+        bate = (bool(fonte_resumido) and comparar_textos(fonte_resumido, doc_texto)) or \
+               (bool(fonte_detalhado) and comparar_textos(fonte_detalhado, doc_texto))
+
+    return fonte_texto, bool(partes), bate
 
 def _formatar_cnpj(digitos):
     digitos = re.sub(r"\D", "", digitos or "")
@@ -876,6 +1122,125 @@ def _formatar_data_iso(iso):
     ano, mes, dia = partes
     return f"{dia}/{mes}/{ano}"
 
+# ------- Consistência entre documentos (mesmo dado, comparado entre os próprios documentos) -------
+
+# rótulo canônico -> rótulos usados nas tabelas dos outros documentos que representam o mesmo dado
+# (alguns chamam a mesma coisa por nomes diferentes - ex: a NF chama "Valor Bruto" o que os outros
+# chamam "Valor"; o Instrumento de Cobrança tem "Valor Faturado" e "Valor Líquido", que nesse
+# sistema são sempre iguais ao "Valor do Serviço" da própria NF - ver Documento 1)
+_CAMPOS_CONSISTENCIA = {
+    "CNPJ": ["CNPJ"],
+    "Processo": ["Processo"],
+    "Nota Fiscal": ["Nota Fiscal"],
+    "Competência": ["Competência"],
+    "Período": ["Período"],
+    "Valor": ["Valor", "Valor Bruto", "Valor Faturado", "Valor Líquido"],
+    "Empenhos": ["Empenhos"],
+}
+
+def _comparar_conjuntos(a, b):
+    # "Empenhos" é uma lista separada por vírgula (pode ter mais de um) - compara os números em si,
+    # não a string inteira (ordem/espaçamento não deveriam importar)
+    return {v.strip() for v in a.split(",") if v.strip()} == {v.strip() for v in b.split(",") if v.strip()}
+
+_COMPARADOR_CONSISTENCIA = {
+    "CNPJ": comparar_cnpjs,
+    "Processo": comparar_textos,
+    "Competência": lambda a, b: a == b,  # já vem normalizado (ver _valor_comparavel)
+    "Período": lambda a, b: a == b,
+    "Valor": comparar_numeros,
+    "Nota Fiscal": comparar_numeros,
+    "Empenhos": _comparar_conjuntos,
+}
+
+def _valor_comparavel(texto_documento):
+    # tira o prefixo "bruto → " quando a exibição precisou de interpretação (ex: "Pagamento de
+    # junho de 2026 → Junho/2026") - pra comparação entre documentos só importa o valor normalizado
+    return texto_documento.split(" → ")[-1] if " → " in texto_documento else texto_documento
+
+# nome completo do bloco (ver montar_tabela) -> como aparece na coluna "Documento" da consistência -
+# só nessa tabela, pra não ficar gigante juntando vários nomes numa célula só (pedido do usuário)
+_NOMES_CURTOS_DOCUMENTO = {
+    "Relatório de Avaliação e Medição dos Resultados": "Gestor Contrato",
+    "Termo Circunstanciado do Gestor do Contrato": "Termo Circunstanciado",
+    "Nota Fiscal": "Nota Fiscal",
+    "Relatório Circunstanciado de Recebimento Provisório": "Relatório Circunstanciado",
+    "Despacho de Ateste de Nota Fiscal de Serviço": "Despacho",
+    "Instrumentos de Cobrança": "IC",
+    "Consulta Optante pelo Simples Nacional": "Consulta Optante",
+}
+
+def processar_consistencia_documentos(nome_arquivo, blocos, processo_p1, contrato, dados_nf, dados_parecer):
+    # roda DEPOIS dos outros processadores (precisa da lista de blocos já pronta pra vasculhar) -
+    # por lógica de negócio, a mesma informação conferida em documentos distintos do mesmo processo
+    # precisa ser igual entre si, não só bater cada uma isoladamente contra a fonte segura (pedido
+    # do usuário 2026-08-24). Só entra na comparação quem tem pelo menos 2 documentos com o dado
+    # disponível - com só 1, não há o que comparar.
+    (fonte_comp_texto, fonte_comp_disp), competencia_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "competencia")
+    (fonte_valor_texto, fonte_valor_disp), valor_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "valor")
+    fonte_periodo = calcular_periodo(competencia_ref) if competencia_ref else None
+    fonte_nf_texto, fonte_nf_disp = _fonte_nf(dados_nf, "nf")
+    nf_ref = dados_nf["nf"] if dados_nf and dados_nf.get("nf") else None
+    fonte_cnpj_fmt = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
+    fonte_empenhos_lista = empenhos_registrados(contrato) if contrato else []
+    fonte_empenhos_ref = ", ".join(fonte_empenhos_lista) if fonte_empenhos_lista else None
+
+    fontes = {
+        "CNPJ": (f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt), fonte_cnpj_fmt),
+        "Processo": (f"{processo_p1} (pág. 1)" if processo_p1 else "não encontrado", bool(processo_p1), processo_p1),
+        "Competência": (fonte_comp_texto, fonte_comp_disp, competencia_ref),
+        "Período": (f"{fonte_periodo} (calculado c/ base na competência)" if fonte_periodo else "depende da competência", bool(fonte_periodo), fonte_periodo),
+        "Valor": (fonte_valor_texto, fonte_valor_disp, valor_ref),
+        "Nota Fiscal": (fonte_nf_texto, fonte_nf_disp, nf_ref),
+        "Empenhos": (f"{fonte_empenhos_ref} (BD)" if fonte_empenhos_ref else ("nenhum empenho cadastrado nesse contrato" if contrato else "contrato não encontrado no banco"), bool(fonte_empenhos_ref), fonte_empenhos_ref),
+    }
+
+    linhas = []
+    for campo, rotulos in _CAMPOS_CONSISTENCIA.items():
+        ocorrencias = []
+        for bloco in blocos:
+            for linha in bloco["linhas"]:
+                if linha["campo"] in rotulos and linha["documento_disponivel"]:
+                    nome_curto = _NOMES_CURTOS_DOCUMENTO.get(bloco["documento"], bloco["documento"])
+                    ocorrencias.append((nome_curto, _valor_comparavel(linha["documento"])))
+
+        if not ocorrencias:
+            continue
+
+        fonte_texto, fonte_disponivel, fonte_valor = fontes[campo]
+        comparador = _COMPARADOR_CONSISTENCIA[campo]
+        if fonte_valor:
+            # tem fonte segura - confere cada documento contra ela, mesmo que só 1 documento tenha
+            # o campo (ex: Empenhos hoje só aparece no Instrumento de Cobrança)
+            referencia = fonte_valor
+            bate = all(comparador(referencia, valor) for _, valor in ocorrencias)
+        elif len(ocorrencias) >= 2:
+            # sem fonte segura, mas ≥ 2 documentos - confere pelo menos entre eles
+            referencia = ocorrencias[0][1]
+            bate = all(comparador(referencia, valor) for _, valor in ocorrencias)
+        else:
+            bate = None  # só 1 documento e sem fonte segura - não há nada pra confrontar de verdade
+
+        # quando bate, mostra só a informação em si (já é a mesma em todos os documentos, não
+        # precisa repetir - isso já está detalhado nos blocos de cada documento, acima) - só
+        # discrimina documento por documento quando NÃO bate, pra ajudar a achar a divergência
+        doc_texto = ocorrencias[0][1] if bate else " | ".join(f"{nome}: {valor}" for nome, valor in ocorrencias)
+        linhas.append(linha_tabela(campo, fonte_texto, fonte_disponivel, doc_texto, True, bate))
+
+    # Processo Anual de Empenho e Natureza de Despesa não vêm de nenhum documento (só do banco) -
+    # não têm o que comparar entre documentos, mas o usuário quer eles em destaque aqui mesmo assim
+    partes_observacao = []
+    if contrato and contrato.get("processo_empenho_anual"):
+        partes_observacao.append(f"Processo Anual de Empenho: {contrato['processo_empenho_anual']}")
+    naturezas = naturezas_despesa_registradas(contrato) if contrato else []
+    if naturezas:
+        partes_observacao.append(f"ND: {', '.join(naturezas)}")
+    observacao = " | ".join(partes_observacao) if partes_observacao else None
+
+    if not linhas and not observacao:
+        return None
+    return montar_tabela(nome_arquivo, "Consistência entre Documentos", None, linhas, observacao)
+
 # ------- ponto de entrada -------
 
 def gerar_conformidade(nome_arquivo, paginas):
@@ -887,6 +1252,7 @@ def gerar_conformidade(nome_arquivo, paginas):
 
     contrato = localizar_contrato(paginas)
     dados_nf = obter_dados_nf(paginas)
+    solicitar_dados_manuais_nf(nome_arquivo, dados_nf)
     dados_parecer = obter_dados_parecer(paginas)
 
     tabelas = []
@@ -897,11 +1263,39 @@ def gerar_conformidade(nome_arquivo, paginas):
         lambda: processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer),
         lambda: processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf, dados_parecer),
         lambda: processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer),
+        lambda: processar_consulta_optante(nome_arquivo, paginas, contrato),
     ):
         tabela = funcao()
         if tabela:
             tabelas.append(tabela)
+
+    consistencia = processar_consistencia_documentos(nome_arquivo, tabelas, processo_p1, contrato, dados_nf, dados_parecer)
+    if consistencia:
+        tabelas.append(consistencia)
+
     return tabelas
+
+def _extrair_texto_ocr(pagina_pdf):
+    # fallback pra páginas sem camada de texto (documento digitalizado como imagem pura, ex:
+    # Consulta Optante pelo Simples Nacional - print de tela da Receita Federal) - roda OCR na
+    # 1ª imagem embutida da página. Ampliar 3x + escala de cinza melhora bastante a leitura desses
+    # prints (testado no euro.pdf); mesmo assim o Tesseract confunde "a"/"o" minúsculos com os
+    # indicadores ordinais "ª"/"º" nesse tipo de fonte fina, e o CNPJ vem com travessão "—" em vez
+    # de hífen - por isso a normalização no final
+    for imagem in pagina_pdf.images:
+        try:
+            figura = Image.open(io.BytesIO(imagem.data)).convert("L")
+            largura, altura = figura.size
+            figura = figura.resize((largura * 3, altura * 3), Image.LANCZOS)
+            texto = pytesseract.image_to_string(figura, lang="por", config="--psm 6")
+        except Exception:
+            continue
+        return texto.replace("ª", "a").replace("º", "o").replace("—", "-")
+    return ""
+
+def _extrair_texto_pagina(pagina_pdf):
+    texto = pagina_pdf.extract_text() or ""
+    return texto if texto.strip() else _extrair_texto_ocr(pagina_pdf)
 
 def coletar_fontes_pdf():
     # mesma dupla fonte que preencher_planilha_ro.py/ns.py usam: abas do Chrome (se disponível) +
@@ -926,7 +1320,7 @@ def coletar_fontes_pdf():
             if "djtools/process_progress2" not in url:
                 continue
             leitor = PdfReader(ns.baixar_pdf_da_aba(navegador, url))
-            fontes.append((url, [p.extract_text() or "" for p in leitor.pages]))
+            fontes.append((url, [_extrair_texto_pagina(p) for p in leitor.pages]))
         navegador.switch_to.window(aba_original)
 
     caminhos_pdf = list(dict.fromkeys(
@@ -935,7 +1329,7 @@ def coletar_fontes_pdf():
     for caminho in caminhos_pdf:
         with open(caminho, "rb") as arquivo:
             leitor = PdfReader(arquivo)
-            fontes.append((caminho, [p.extract_text() or "" for p in leitor.pages]))
+            fontes.append((caminho, [_extrair_texto_pagina(p) for p in leitor.pages]))
 
     return fontes, aviso
 
@@ -1057,7 +1451,7 @@ HTML_CONFORMIDADE = r"""
     <div class="marca-icone"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></div>
     <div>
       <h1>Resultado da Conformidade</h1>
-      <p class="subtitulo">Documentos preenchidos x Fontes seguras (NF e BD).</p>
+      <p class="subtitulo">Documentos preenchidos x Fontes seguras (BD, Termo Gestor e NF).</p>
     </div>
   </div>
   <div id="conteudo"></div>
@@ -1099,9 +1493,10 @@ HTML_CONFORMIDADE = r"""
 
   function montarPainelDocumento(bloco) {
     const observacao = bloco.observacao ? `<p class="observacao">${bloco.observacao}</p>` : "";
+    const pagina = bloco.pagina ? `<span class="pagina-doc">pág. ${bloco.pagina}</span>` : "";
     return `
       <div class="painel">
-        <h2>${bloco.documento} <span class="pagina-doc">pág. ${bloco.pagina}</span></h2>
+        <h2>${bloco.documento} ${pagina}</h2>
         ${montarTabelaLinhas(bloco.linhas)}
         ${observacao}
       </div>
