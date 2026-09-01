@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS contratos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tipo_contrato TEXT NOT NULL,
     situacao TEXT NOT NULL DEFAULT 'vigente',
+    -- só p/ contrato de serviço: 1 = com mão de obra (processo tem IMR + Termo Circunstanciado do
+    -- Gestor), 0 = sem mão de obra (conferência começa na NF), NULL = não informado. É a fonte
+    -- segura que a conformidade usa pra decidir se cobra ou não esses dois documentos.
+    tem_mao_de_obra INTEGER,
     nome_contratada TEXT NOT NULL,
     nome_planilha_controle TEXT,
     cnpj TEXT,
@@ -102,7 +106,7 @@ _TABELAS_EXPORTAVEIS = (
 # texto) - todo o resto (inclusive as colunas de texto vazias) volta como string ou None
 _COLUNAS_NUMERICAS = {
     "contratos": {
-        "id": int, "iss_incide": int, "iss_aliquota": float,
+        "id": int, "tem_mao_de_obra": int, "iss_incide": int, "iss_aliquota": float,
         "previdenciaria_incide": int, "previdenciaria_aliquota": float,
         "federais_incide": int, "federais_aliquota_total": float,
     },
@@ -146,6 +150,8 @@ def _migrar_esquema(conexao):
     colunas_contratos = {linha["name"] for linha in conexao.execute("PRAGMA table_info(contratos)")}
     if "objeto_detalhado" not in colunas_contratos:
         conexao.execute("ALTER TABLE contratos ADD COLUMN objeto_detalhado TEXT")
+    if "tem_mao_de_obra" not in colunas_contratos:
+        conexao.execute("ALTER TABLE contratos ADD COLUMN tem_mao_de_obra INTEGER")
 
     colunas_empenhos = {linha["name"] for linha in conexao.execute("PRAGMA table_info(contrato_empenhos)")}
     if "natureza_despesa" not in colunas_empenhos:
@@ -367,7 +373,7 @@ def obter_contrato(contrato_id):
         return contrato
 
 _COLUNAS_CONTRATO = (
-    "tipo_contrato", "situacao", "nome_contratada", "nome_planilha_controle", "cnpj",
+    "tipo_contrato", "situacao", "tem_mao_de_obra", "nome_contratada", "nome_planilha_controle", "cnpj",
     "objeto_resumido", "objeto_detalhado",
     "numero_pregao", "numero_contrato", "vigencia_inicio", "vigencia_fim",
     "processo_contratacao", "processo_empenho_anual", "banco", "agencia", "conta",
@@ -381,6 +387,8 @@ def _valores_colunas(dados):
         valor = dados.get(coluna)
         if coluna.endswith("_incide"):
             valor = int(bool(valor))
+        elif coluna == "tem_mao_de_obra":
+            valor = None if valor in (None, "") else int(valor)  # NULL = não informado
         valores.append(valor)
     return valores
 
@@ -469,3 +477,29 @@ def excluir_contrato(contrato_id):
         conexao.execute("DELETE FROM contratos WHERE id = ?", (contrato_id,))
     fazer_backup()  # snapshot pós-exclusão - a recuperação do contrato excluído vem do
                      # snapshot ANTERIOR a esta chamada, mantido pela rotação de backups
+
+def acrescentar_observacao_linha(contrato_id, prefixo, linha):
+    # acrescenta / substitui / remove UMA linha na Observação do contrato, identificada por
+    # `prefixo` - idempotente: rodar de novo com o mesmo prefixo troca a linha, não duplica;
+    # `linha=None` só remove a linha do prefixo. Usado pela conferência de conformidade pra manter
+    # a lista de itens não entregues numa entrega parcial de almoxarifado. Não faz nada se o texto
+    # não mudar (não gera backup à toa).
+    with _conexao() as conexao:
+        linha_atual = conexao.execute(
+            "SELECT observacao FROM contratos WHERE id = ?", (contrato_id,)
+        ).fetchone()
+        if linha_atual is None:
+            return False
+        atual = (linha_atual["observacao"] or "").strip()
+        mantidas = [l for l in atual.split("\n") if l.strip() and not l.strip().startswith(prefixo)]
+        if linha:
+            mantidas.append(linha)
+        nova = "\n".join(mantidas)
+        if nova == atual:
+            return False
+        conexao.execute(
+            "UPDATE contratos SET observacao = ?, atualizado_em = datetime('now') WHERE id = ?",
+            (nova, contrato_id),
+        )
+    fazer_backup()
+    return True

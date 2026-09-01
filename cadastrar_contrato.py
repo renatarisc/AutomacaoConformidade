@@ -3,6 +3,7 @@ import json
 import webview  # mesma lib do gui.py - aqui só abre uma segunda janela sobre a mesma instância
 
 import contratos_db
+import janela_windows
 
 class ApiContrato:
     # ponte Python <-> JS desta janela (window.pywebview.api.<metodo>), independente da Api
@@ -151,7 +152,14 @@ HTML_CONTRATO = r"""
   .sub-grupo { display: none; }
   .sub-grupo.aberto { display: grid; }
 
-  .rodape-form { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+  /* rodapé fixo no fim da viewport - o formulário é longo e a janela pode ficar maior que a área
+     útil da tela; sem isso o botão Salvar some atrás da barra de tarefas */
+  .rodape-form {
+    display: flex; gap: 8px; justify-content: flex-end;
+    position: sticky; bottom: 0; z-index: 5;
+    margin-top: 12px; padding: 10px 0 8px;
+    background: var(--mist); border-top: 1px solid var(--hairline);
+  }
   .oculto { display: none !important; }
   .erro-form { color: var(--status-error); font-size: 12px; margin: 0 0 10px; }
 
@@ -250,6 +258,11 @@ HTML_CONTRATO = r"""
             <label>Nome da contratada</label>
             <input id="campo-nome_contratada" required>
           </div>
+        </div>
+
+        <div class="toggle-linha" id="grupo-mao-de-obra">
+          <input type="checkbox" id="campo-tem_mao_de_obra">
+          <label for="campo-tem_mao_de_obra">Contrato com mão de obra</label>
         </div>
 
         <div class="linha-campos">
@@ -554,6 +567,7 @@ HTML_CONTRATO = r"""
           <div class="grade">
             ${linhaVisualizacao("Tipo de contrato", contrato.tipo_contrato === "servico" ? "Serviço" : "Almoxarifado")}
             ${linhaVisualizacao("Situação", contrato.situacao === "encerrado" ? "Encerrado" : "Vigente")}
+            ${ehServico ? linhaVisualizacao("Mão de obra", contrato.tem_mao_de_obra == null ? "Não informado" : (contrato.tem_mao_de_obra ? "Com mão de obra" : "Sem mão de obra")) : ""}
             ${linhaVisualizacao("Planilha de controle", contrato.nome_planilha_controle)}
             ${linhaVisualizacao("CNPJ", formatarCnpj(contrato.cnpj || ""))}
             ${linhaVisualizacao("Nº do pregão", contrato.numero_pregao)}
@@ -778,6 +792,7 @@ HTML_CONTRATO = r"""
   function atualizarVisibilidadePorTipo() {
     const ehServico = document.getElementById("campo-tipo_contrato").value === "servico";
     document.getElementById("grupo-processo-empenho-anual").classList.toggle("oculto", !ehServico);
+    document.getElementById("grupo-mao-de-obra").classList.toggle("oculto", !ehServico);
     document.getElementById("painel-empenhos-servico").classList.toggle("oculto", !ehServico);
     document.getElementById("painel-processos-empenho").classList.toggle("oculto", ehServico);
     // almoxarifado não tem valor mensal - só serviço (ex: limpeza, vigilância) tem esse conceito
@@ -835,6 +850,7 @@ HTML_CONTRATO = r"""
     document.getElementById("campo-id").value = contrato.id;
     document.getElementById("campo-tipo_contrato").value = contrato.tipo_contrato;
     document.getElementById("campo-situacao").value = contrato.situacao || "vigente";
+    document.getElementById("campo-tem_mao_de_obra").checked = !!contrato.tem_mao_de_obra;
     document.getElementById("campo-nome_contratada").value = contrato.nome_contratada || "";
     document.getElementById("campo-nome_planilha_controle").value = contrato.nome_planilha_controle || "";
     document.getElementById("campo-cnpj").value = formatarCnpj(contrato.cnpj || "");
@@ -913,6 +929,9 @@ HTML_CONTRATO = r"""
       id: document.getElementById("campo-id").value ? Number(document.getElementById("campo-id").value) : null,
       tipo_contrato: tipo,
       situacao: document.getElementById("campo-situacao").value,
+      tem_mao_de_obra: tipo === "servico"
+        ? document.getElementById("campo-tem_mao_de_obra").checked
+        : null,
       nome_contratada: document.getElementById("campo-nome_contratada").value,
       nome_planilha_controle: document.getElementById("campo-nome_planilha_controle").value,
       cnpj: document.getElementById("campo-cnpj").value.replace(/\D/g, ""),
@@ -967,12 +986,16 @@ def abrir_janela():
     # cria a janela em cima da instância de webview já em execução (a principal do gui.py) -
     # não chama webview.start() de novo, pywebview permite criar janelas dinamicamente
     contratos_db.inicializar_db()
-    webview.create_window("CCRGCI - Cadastro de Contratos", html=HTML_CONTRATO, js_api=ApiContrato(), width=980, height=760)
+    x, y, largura, altura = janela_windows.geometria_para_tela(980, 760)
+    webview.create_window("CCRGCI - Cadastro de Contratos", html=HTML_CONTRATO, js_api=ApiContrato(),
+                          width=largura, height=altura, x=x, y=y)
 
 def main(nome_planilha=None):
     # permite rodar este arquivo sozinho (fora do gui.py) pra testar a tela isolada
     contratos_db.inicializar_db()
-    webview.create_window("CCRGCI - Cadastro de Contratos", html=HTML_CONTRATO, js_api=ApiContrato(), width=980, height=760)
+    x, y, largura, altura = janela_windows.geometria_para_tela(980, 760)
+    webview.create_window("CCRGCI - Cadastro de Contratos", html=HTML_CONTRATO, js_api=ApiContrato(),
+                          width=largura, height=altura, x=x, y=y)
     webview.start()
 
 if __name__ == "__main__":

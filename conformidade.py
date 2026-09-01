@@ -12,6 +12,7 @@ from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
 
 import contratos_db
+import janela_windows
 import pdf_aberto_windows
 import preencher_planilha_ns as ns  # reaproveita localizar_texto_nf, RE_NUMERO_NF, RE_EMPRESA,
                                      # extrair_data_emissao_nf, extrair_competencia_nf, juntar_com_e -
@@ -152,6 +153,40 @@ def exibir_competencia(bruto, normalizado):
         return None
     return normalizado if bruto == normalizado else f"{bruto} → {normalizado}"
 
+def _mes_digitado_para_numero(chave):
+    # aceita o mês digitado à mão como nome completo (com/sem acento, qualquer caixa) OU abreviação
+    # de >= 3 letras ("jun", "mar", "dez") - prefixo de 3 é sempre único entre os 12 meses. Número
+    # ("06") é tratado por quem chama, não aqui.
+    import unicodedata
+    def sem_acento(v):
+        return unicodedata.normalize("NFKD", v or "").encode("ascii", "ignore").decode().lower().strip()
+    alvo = sem_acento(chave)
+    if not alvo:
+        return None
+    for numero, nome in enumerate(_MESES_NOME):
+        if not nome:
+            continue
+        nome_norm = sem_acento(nome)
+        if nome_norm == alvo or (len(alvo) >= 3 and nome_norm.startswith(alvo)):
+            return numero
+    return None
+
+def _normalizar_competencia_digitada(texto):
+    # o valor digitado à mão na janela da NF (ex: "junho/2026", "jun/2026", "Junho / 2026",
+    # "06/2026") tem que virar o MESMO formato que extrair_competencia_documento produz
+    # ("Junho/2026") - senão a comparação (== puro) com o texto dos documentos falha só por
+    # caixa/abreviação/mês numérico
+    if not texto:
+        return texto
+    match = re.match(r"\s*([A-Za-zçÇãÃéÉêÊúÚ]+|\d{1,2})\s*/\s*(\d{4})\s*$", texto)
+    if not match:
+        return texto.strip()
+    chave = match.group(1)
+    numero_mes = int(chave) if chave.isdigit() else _mes_digitado_para_numero(chave)
+    if not numero_mes or not (1 <= numero_mes <= 12):
+        return texto.strip()
+    return f"{_MESES_NOME[numero_mes]}/{match.group(2)}"
+
 # ------- dados da própria nota fiscal (fonte segura) -------
 
 RE_VALOR_SERVICO_NF = re.compile(r"Valor do Servi\D?o\s*\n?\s*R\$\s*([\d.,]+)")
@@ -230,6 +265,7 @@ HTML_DIGITACAO_NF = r"""
   }}
   h1 {{ margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }}
   .subtitulo {{ margin: 3px 0 0; color: var(--ink-soft); font-size: 12px; line-height: 1.5; }}
+  .subtitulo .pagina-ref {{ color: var(--ink-faint); white-space: nowrap; }}
   .campo {{ display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }}
   label {{ font-size: 11.5px; font-weight: 600; color: var(--ink-soft); }}
   input {{
@@ -333,10 +369,14 @@ def solicitar_dados_manuais_nf(nome_arquivo, dados_nf):
 
     pagina_numero = dados_nf["paginas"][0] if dados_nf["paginas"] else None
     abriu_pdf = _abrir_pdf_na_pagina(nome_arquivo, pagina_numero) if pagina_numero else False
-    mensagem = (
-        "Preencha os campos abaixo, conforme a NF." if abriu_pdf
-        else f"{pagina_nf_str(dados_nf) or 'página não identificada'}; abra o documento e preencha os campos abaixo."
-    )
+    # instrução primeiro, depois a página em cinza (mesmo tom --ink-faint dos resultados)
+    if dados_nf["paginas"]:
+        paginas_texto = ns.juntar_com_e(dados_nf["paginas"])
+        pagina_ref = f' <span class="pagina-ref">pág. {paginas_texto}</span>'
+    else:
+        pagina_ref = ' <span class="pagina-ref">página não identificada</span>'
+    instrucao = "Preencha os campos abaixo, conforme a NF." if abriu_pdf else "Abra o documento e preencha os campos abaixo."
+    mensagem = f"{instrucao}{pagina_ref}"
 
     html = HTML_DIGITACAO_NF.format(mensagem=mensagem, campos_html=campos_html)
 
@@ -367,6 +407,8 @@ def solicitar_dados_manuais_nf(nome_arquivo, dados_nf):
     for campo in campos_faltando:
         valor = resultado.get(campo)
         if valor:
+            if campo == "competencia":
+                valor = _normalizar_competencia_digitada(valor)  # "junho/2026" -> "Junho/2026"
             dados_nf[campo] = valor
             digitados.add(campo)
 
@@ -427,15 +469,18 @@ def formatar_bloco_markdown(bloco):
     # usado só pelo main()/CLI (rodar este arquivo sozinho) - a janela HTML não passa por aqui,
     # ela recebe os dicts direto e monta a tabela em HTML
     pagina = f" (pág. {bloco['pagina']})" if bloco["pagina"] else ""
-    cabecalho = f"**{bloco['arquivo']} — {bloco['documento']}{pagina}**"
+    sigla = f" ({bloco['sigla']})" if bloco.get("sigla") else ""
+    cabecalho = f"**{bloco['arquivo']} — {bloco['documento']}{sigla}{pagina}**"
     linhas_md = []
     for linha in bloco["linhas"]:
         fonte = f"`{linha['fonte']}`" if linha["fonte_disponivel"] else f"*({linha['fonte']})*"
         doc = f"`{linha['documento']}`" if linha["documento_disponivel"] else f"*({linha['documento']})*"
         resultado = {"ok": "✅", "nao": "❌", "indefinido": "➖"}[linha["resultado"]]
         linhas_md.append(f"| {linha['campo']} | {fonte} | {doc} | {resultado} |")
-    corpo = "\n".join(["| Campo | Fonte segura | Documento | Resultado |", "|---|---|---|---|", *linhas_md])
     observacao = f"\n\n⚠️ {bloco['observacao']}" if bloco.get("observacao") else ""
+    if not bloco["linhas"]:  # bloco só de observação (ex: Documentos não localizados)
+        return f"{cabecalho}{observacao}"
+    corpo = "\n".join(["| Campo | Fonte segura | Documento | Resultado |", "|---|---|---|---|", *linhas_md])
     return f"{cabecalho}\n\n{corpo}{observacao}"
 
 # ------- Documento 1: Relatório Circunstanciado de Recebimento Provisório -------
@@ -623,8 +668,26 @@ RE_NUMERO_NF_INSTRUMENTO = re.compile(r"N[uú]mero:\s*(\d+)")
 RE_DT_EMISSAO = re.compile(r"Dt\. Emiss[ãa]o:\s*(\d{2}/\d{2}/\d{4})")
 RE_VALOR_FATURADO = re.compile(r"Valor Faturado:\s*R\$\s*([\d.,]+)")
 RE_VALOR_LIQUIDO = re.compile(r"Valor Liquido:\s*R\$\s*([\d.,]+)")
+RE_IC_OPTANTE = re.compile(r"Optante pelo Simples:\s*(\w+)", re.IGNORECASE)
 
-def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer):
+def _linha_optante_simples(texto, dados_optante):
+    # "Optante pelo Simples: <Sim|Não>" do Instrumento de Cobrança conferido contra a tela da
+    # Receita Federal (Consulta Optante) - a Receita é a fonte segura; divergência = erro DA IC.
+    # Vale pros dois fluxos (serviço e almoxarifado). dados_optante vem de obter_dados_optante.
+    m = RE_IC_OPTANTE.search(texto)
+    doc_opt = None
+    if m:
+        doc_opt = "Optante" if m.group(1).strip().lower().startswith("s") else "Não optante"
+    fonte_opt = (dados_optante or {}).get("situacao")
+    return linha_tabela(
+        "Optante pelo Simples",
+        f"{fonte_opt} (Consulta Optante pág. {dados_optante['pagina']})" if fonte_opt else "Consulta Optante não localizada no processo",
+        bool(fonte_opt),
+        doc_opt or "não encontrado no documento", bool(doc_opt),
+        (fonte_opt == doc_opt) if fonte_opt and doc_opt else None,
+    )
+
+def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer, dados_optante=None):
     # última ocorrência, não a primeira - mesmo raciocínio do RAMR/IMR (ver
     # processar_relatorio_avaliacao_medicao); confirmado real no prevelar.pdf, que tem 2 páginas de
     # Instrumentos de Cobrança com Dt. Emissão diferente (17/07 vs 16/07 - correção posterior)
@@ -706,6 +769,8 @@ def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato,
         bate_empenhos,
     ))
 
+    linhas.append(_linha_optante_simples(texto, dados_optante))
+
     return montar_tabela(nome_arquivo, "Instrumentos de Cobrança", indice + 1, linhas)
 
 # ------- Documento 7: Consulta Optante pelo Simples Nacional (Receita Federal) -------
@@ -714,6 +779,22 @@ def processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato,
 # em _extrair_texto_ocr() (ver coletar_fontes_pdf), não do extract_text() normal do PDF
 RE_CNPJ_OPTANTE = re.compile(r"CNPJ:\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", re.IGNORECASE)
 RE_SITUACAO_SIMPLES = re.compile(r"Situa[çc][ãa]o no Simples Nacional:\s*(N[ÃA]O\s+optante|Optante)\s+pelo Simples Nacional", re.IGNORECASE)
+
+def obter_dados_optante(paginas):
+    # a tela da Receita Federal "Consulta Optante pelo Simples Nacional" (imagem/OCR) é a FONTE
+    # SEGURA da situação no Simples - outros documentos que citam isso (ex: o Instrumento de
+    # Cobrança) têm que bater com ela. Devolve {"pagina", "situacao": "Optante"|"Não optante"} ou None.
+    indices = [i for i, t in enumerate(paginas) if "SIMPLES NACIONAL" in t.upper() and "SIMEI" in t.upper()]
+    if not indices:
+        return None
+    indice = indices[-1]
+    m = RE_SITUACAO_SIMPLES.search(paginas[indice])
+    if not m:
+        return None
+    return {
+        "pagina": indice + 1,
+        "situacao": "Não optante" if m.group(1).strip().upper().startswith("N") else "Optante",
+    }
 
 def processar_consulta_optante(nome_arquivo, paginas, contrato):
     # identifica a página pelo conteúdo (não tem um título fixo pra buscar, é só o print da tela da
@@ -997,16 +1078,24 @@ def obter_dados_parecer(paginas):
         "competencia": competencia,
     }
 
-def processar_nota_fiscal(nome_arquivo, dados_nf, dados_parecer, contrato):
-    # só existe um bloco de conferência da NF quando há Termo Circunstanciado no processo - sem
-    # ele, a própria NF já É a fonte segura usada por todos os outros documentos (não faz sentido
-    # comparar a NF contra ela mesma)
-    if not dados_parecer:
+def processar_nota_fiscal(nome_arquivo, dados_nf, dados_parecer, contrato, sem_mao_de_obra=False):
+    # COM PARECER (contrato de serviço com mão de obra): confere Competência e Valor Bruto contra o
+    # PARECER do Gestor, além de CNPJ/Contrato/Domicílio contra o BD.
+    # SEM PARECER: só há bloco quando é contrato de serviço SEM mão de obra - aí confere só o que tem
+    # fonte no BD (CNPJ sempre; Contrato e Domicílio quando a NF os cita) e o Valor Bruto contra o
+    # valor mensal fixo do contrato, SE houver (ver _valor_mensal_fixo); sem valor fixo cadastrado, o
+    # Valor Bruto não é conferido, só listado na observação junto do Valor Líquido. Competência não
+    # entra (sem PARECER e sem fonte no BD, não há contra o que comparar).
+    # SEM PARECER e sem ser contrato sem mão de obra (ex: contrato não identificado no BD): não há
+    # bloco - a NF já é a fonte segura dos outros documentos, comparar a NF contra ela mesma não serve.
+    if not dados_parecer and not sem_mao_de_obra:
         return None
 
-    pagina = dados_nf["paginas"][0] if dados_nf and dados_nf["paginas"] else dados_parecer["pagina"]
+    pagina = (dados_nf["paginas"][0] if dados_nf and dados_nf["paginas"]
+              else (dados_parecer["pagina"] if dados_parecer else None))
 
     linhas = []
+    observacao_partes = []
 
     fonte_cnpj = contrato["cnpj"] if contrato else None
     fonte_cnpj_fmt = _formatar_cnpj(fonte_cnpj) if fonte_cnpj else None
@@ -1017,23 +1106,38 @@ def processar_nota_fiscal(nome_arquivo, dados_nf, dados_parecer, contrato):
         comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
     ))
 
-    fonte_comp = dados_parecer.get("competencia")
-    doc_comp = dados_nf["competencia"] if dados_nf else None
-    linhas.append(linha_tabela(
-        "Competência",
-        f"{fonte_comp} (Gestor do Contrato pág. {dados_parecer['pagina']})" if fonte_comp else "não encontrada no Termo", bool(fonte_comp),
-        doc_comp or "não encontrada na NF", bool(doc_comp),
-        (fonte_comp == doc_comp) if fonte_comp and doc_comp else None,
-    ))
+    if dados_parecer:
+        fonte_comp = dados_parecer.get("competencia")
+        doc_comp = dados_nf["competencia"] if dados_nf else None
+        linhas.append(linha_tabela(
+            "Competência",
+            f"{fonte_comp} (Gestor do Contrato pág. {dados_parecer['pagina']})" if fonte_comp else "não encontrada no Termo", bool(fonte_comp),
+            doc_comp or "não encontrada na NF", bool(doc_comp),
+            (fonte_comp == doc_comp) if fonte_comp and doc_comp else None,
+        ))
 
-    fonte_valor = dados_parecer.get("valor")
-    doc_valor = dados_nf["valor"] if dados_nf else None
-    linhas.append(linha_tabela(
-        "Valor Bruto",
-        f"{fonte_valor} (Gestor do Contrato pág. {dados_parecer['pagina']})" if fonte_valor else "não encontrado no Termo", bool(fonte_valor),
-        doc_valor or "não encontrado na NF", bool(doc_valor),
-        comparar_numeros(fonte_valor, doc_valor) if fonte_valor and doc_valor else None,
-    ))
+    # Valor Bruto: contra o PARECER (com mão de obra) ou contra o valor mensal fixo do BD (sem mão
+    # de obra); sem nenhuma das duas fontes, cai na observação, do mesmo jeito que o Valor Líquido
+    doc_valor = dados_nf.get("valor") if dados_nf else None
+    if dados_parecer:
+        fonte_valor = dados_parecer.get("valor")
+        linhas.append(linha_tabela(
+            "Valor Bruto",
+            f"{fonte_valor} (Gestor do Contrato pág. {dados_parecer['pagina']})" if fonte_valor else "não encontrado no Termo", bool(fonte_valor),
+            doc_valor or "não encontrado na NF", bool(doc_valor),
+            comparar_numeros(fonte_valor, doc_valor) if fonte_valor and doc_valor else None,
+        ))
+    else:
+        valor_fixo = _valor_mensal_fixo(contrato)
+        if valor_fixo is not None:
+            nf_float = _valor_para_float(doc_valor)
+            linhas.append(linha_tabela(
+                "Valor Bruto", f"{_float_para_valor_br(valor_fixo)} (valor mensal fixo, BD)", True,
+                doc_valor or "não encontrado na NF", bool(doc_valor),
+                (abs(valor_fixo - nf_float) < 0.005) if nf_float is not None else None,
+            ))
+        else:
+            observacao_partes.append(f"Valor bruto: {doc_valor or 'não encontrado na NF'}")
 
     # Contrato e Domicílio Bancário só entram na conferência quando a própria NF cita esses dados -
     # nem todo modelo de NFS-e traz isso na "Descrição do Serviço" (ver RE_CONTRATO_NF/RE_DADOS_BANCARIOS_NF)
@@ -1060,7 +1164,8 @@ def processar_nota_fiscal(nome_arquivo, dados_nf, dados_parecer, contrato):
         linhas.append(linha_tabela("Domicílio Bancário", fonte_texto, tem_fonte, doc_texto, True, bate_domicilio))
 
     valor_liquido = dados_nf.get("valor_liquido") if dados_nf else None
-    observacao = f"Valor líquido: {valor_liquido or 'não encontrado na NF'}"
+    observacao_partes.append(f"Valor líquido: {valor_liquido or 'não encontrado na NF'}")
+    observacao = " | ".join(observacao_partes)
 
     return montar_tabela(nome_arquivo, "Nota Fiscal", pagina, linhas, observacao)
 
@@ -1092,21 +1197,25 @@ def _conferir_objeto(contrato, doc_texto):
     # [[project-contratos-db-schema]]) - cada documento cita uma versão diferente (o Despacho usa a
     # descrição detalhada, o Termo Circunstanciado usa a resumida, por exemplo) - bate se o texto
     # do documento conferir com QUALQUER um dos dois, não precisa ser sempre o mesmo
-    fonte_resumido = contrato["objeto_resumido"] if contrato else None
-    fonte_detalhado = contrato["objeto_detalhado"] if contrato else None
-    partes = []
-    if fonte_resumido:
-        partes.append(f"Resumido: {fonte_resumido}")
-    if fonte_detalhado:
-        partes.append(f"Detalhado: {fonte_detalhado}")
-    fonte_texto = f"{' | '.join(partes)} (BD)" if partes else ("objeto não cadastrado no banco" if contrato else "contrato não encontrado no banco")
+    candidatos = []  # (rótulo, valor) - só os cadastrados
+    if contrato and contrato.get("objeto_resumido"):
+        candidatos.append(("Resumido", contrato["objeto_resumido"]))
+    if contrato and contrato.get("objeto_detalhado"):
+        candidatos.append(("Detalhado", contrato["objeto_detalhado"]))
 
-    bate = None
-    if doc_texto and partes:
-        bate = (bool(fonte_resumido) and comparar_textos(fonte_resumido, doc_texto)) or \
-               (bool(fonte_detalhado) and comparar_textos(fonte_detalhado, doc_texto))
+    if not candidatos:
+        return ("objeto não cadastrado no banco" if contrato else "contrato não encontrado no banco"), False, None
 
-    return fonte_texto, bool(partes), bate
+    correspondente = next(
+        ((rotulo, valor) for rotulo, valor in candidatos if comparar_textos(valor, doc_texto)), None
+    ) if doc_texto else None
+
+    if correspondente:
+        # bateu com um dos dois - mostra só esse (pedido do usuário), não os dois
+        return f"{correspondente[0]}: {correspondente[1]} (BD)", True, True
+    # não bateu nenhum (ou não há texto no documento) - mostra os dois, pra ver o que foi conferido
+    fonte_texto = " | ".join(f"{rotulo}: {valor}" for rotulo, valor in candidatos) + " (BD)"
+    return fonte_texto, True, (False if doc_texto else None)
 
 def _formatar_cnpj(digitos):
     digitos = re.sub(r"\D", "", digitos or "")
@@ -1121,6 +1230,36 @@ def _formatar_data_iso(iso):
         return None
     ano, mes, dia = partes
     return f"{dia}/{mes}/{ano}"
+
+def _valor_mensal_fixo(contrato):
+    # soma dos itens de "Valores Mensais" do contrato no BD - alguns contratos de serviço SEM mão de
+    # obra têm um valor mensal fixo cadastrado, e ele é a fonte segura do Valor Bruto da NF (não há
+    # PARECER do Gestor nesses). None quando não há nenhum valor mensal cadastrado (campo em branco
+    # no BD) - nesse caso o Valor Bruto vira só informativo (ver processar_nota_fiscal).
+    if not contrato:
+        return None
+    total = sum(item.get("valor") or 0 for item in (contrato.get("valores_mensais") or []))
+    return total if total > 0 else None
+
+def _valor_para_float(texto):
+    # "7.130,22" / "7130,22" / "7130.22" -> 7130.22 ; None se não parseável
+    if texto in (None, ""):
+        return None
+    limpo = re.sub(r"[^\d,.]", "", str(texto))
+    if not limpo:
+        return None
+    if "," in limpo:                 # formato BR: "," decimal, "." milhar
+        limpo = limpo.replace(".", "").replace(",", ".")
+    elif limpo.count(".") > 1:       # "1.234.567" sem decimais -> só milhares
+        limpo = limpo.replace(".", "")
+    try:
+        return float(limpo)
+    except ValueError:
+        return None
+
+def _float_para_valor_br(numero):
+    # 7130.22 -> "7.130,22" (mesmo formato dos valores extraídos da NF)
+    return f"{numero:,.2f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".")
 
 # ------- Consistência entre documentos (mesmo dado, comparado entre os próprios documentos) -------
 
@@ -1143,12 +1282,24 @@ def _comparar_conjuntos(a, b):
     # não a string inteira (ordem/espaçamento não deveriam importar)
     return {v.strip() for v in a.split(",") if v.strip()} == {v.strip() for v in b.split(",") if v.strip()}
 
+def _valores_monetarios_batem(a, b):
+    # "Valor" comparado pelo número em si (centavos), tolerando formatos diferentes ("7.130,22" x
+    # "7130,22" x "7130.22") - comparar_numeros quebra com separador de milhar junto do decimal
+    fa, fb = _valor_para_float(a), _valor_para_float(b)
+    return fa is not None and fb is not None and abs(fa - fb) < 0.005
+
+def _valor_ate(a, b):
+    # a <= b (valores numéricos/monetários), com tolerância de meio centavo - usado quando a
+    # entrega pode ser MENOR que o autorizado (NF <= OF)
+    fa, fb = _valor_para_float(a), _valor_para_float(b)
+    return fa is not None and fb is not None and fa <= fb + 0.005
+
 _COMPARADOR_CONSISTENCIA = {
     "CNPJ": comparar_cnpjs,
     "Processo": comparar_textos,
     "Competência": lambda a, b: a == b,  # já vem normalizado (ver _valor_comparavel)
     "Período": lambda a, b: a == b,
-    "Valor": comparar_numeros,
+    "Valor": _valores_monetarios_batem,
     "Nota Fiscal": comparar_numeros,
     "Empenhos": _comparar_conjuntos,
 }
@@ -1178,6 +1329,12 @@ def processar_consistencia_documentos(nome_arquivo, blocos, processo_p1, contrat
     # disponível - com só 1, não há o que comparar.
     (fonte_comp_texto, fonte_comp_disp), competencia_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "competencia")
     (fonte_valor_texto, fonte_valor_disp), valor_ref = _fonte_autorizacao_ou_nf(dados_parecer, dados_nf, "valor")
+    # sem PARECER e com valor mensal fixo cadastrado (contrato de serviço sem mão de obra), o valor
+    # fixo do BD é a referência de Valor - não a NF (mesma fonte usada no bloco da própria NF)
+    valor_fixo = None if (dados_parecer and dados_parecer.get("valor")) else _valor_mensal_fixo(contrato)
+    if valor_fixo is not None:
+        valor_fixo_br = _float_para_valor_br(valor_fixo)
+        fonte_valor_texto, fonte_valor_disp, valor_ref = f"{valor_fixo_br} (valor mensal fixo, BD)", True, valor_fixo_br
     fonte_periodo = calcular_periodo(competencia_ref) if competencia_ref else None
     fonte_nf_texto, fonte_nf_disp = _fonte_nf(dados_nf, "nf")
     nf_ref = dados_nf["nf"] if dados_nf and dados_nf.get("nf") else None
@@ -1235,11 +1392,1084 @@ def processar_consistencia_documentos(nome_arquivo, blocos, processo_p1, contrat
     naturezas = naturezas_despesa_registradas(contrato) if contrato else []
     if naturezas:
         partes_observacao.append(f"ND: {', '.join(naturezas)}")
-    observacao = " | ".join(partes_observacao) if partes_observacao else None
+    # ambos vêm só do banco - "(BD)" no fim da linha deixa a fonte explícita, igual às células da tabela
+    observacao = f"{' | '.join(partes_observacao)} (BD)" if partes_observacao else None
 
     if not linhas and not observacao:
         return None
     return montar_tabela(nome_arquivo, "Consistência entre Documentos", None, linhas, observacao)
+
+# ------- Documento esperado que não gerou conferência -------
+
+def _bloco_ausente(nome_arquivo, nome_documento, dados_parecer, motivo=None):
+    # placeholder pra um dos documentos esperados que não gerou bloco de conferência - aparece na
+    # MESMA posição em que apareceria se tivesse sido encontrado, só que sem a tabela de campos: no
+    # lugar dela, o motivo em vermelho (ver .observacao--solta no HTML).
+    # "não detectado" abrange tanto a ausência real do documento no processo quanto uma falha na
+    # detecção do título (OCR ruim, grafia diferente da esperada) - não dá pra distinguir aqui.
+    # A Nota Fiscal (de serviço) só cai aqui quando não há PARECER E não é contrato de serviço sem
+    # mão de obra (ex: contrato não identificado no BD) - contrato sem mão de obra gera bloco real
+    # de NF, ver processar_nota_fiscal. `motivo` explícito pula essa regra (usado pelo almoxarifado).
+    if motivo is None:
+        if nome_documento == "Nota Fiscal" and not dados_parecer:
+            motivo = "NF não conferida — processo sem PARECER do Gestor do Contrato (informativo)"
+        else:
+            motivo = "Documento não detectado no processo"
+    return montar_tabela(nome_arquivo, nome_documento, None, [], motivo)
+
+# ======= CONTRATO DE ALMOXARIFADO =======
+# conjunto de documentos diferente do de serviço (sem IMR / Termo Circunstanciado / PARECER do
+# Gestor). Implementado documento a documento, conforme definido com o usuário.
+
+def _mesmos_digitos(a, b):
+    # compara só os dígitos, ignorando pontuação (".", "/", "-", espaços) - usado onde a mesma
+    # informação vem com formatação diferente entre o BD e o documento: nº de processo (BD
+    # "23323.001485.2024-97" x doc ".../..."), agência/conta bancária ("69453-3" x "69.453-3"), etc.
+    return bool(a) and bool(b) and re.sub(r"\D", "", a) == re.sub(r"\D", "", b)
+
+_CNPJ_IFF_RAIZ = "10779511"  # raiz do CNPJ do IFFluminense (contratante) - só pra separar do fornecedor
+
+def _cnpj_fornecedor(cnpjs):
+    # entre os CNPJs achados num documento, o do fornecedor é o que NÃO é o do IFF (contratante).
+    # NÃO escolhe "o que bate com o contrato" de propósito: um CNPJ de fornecedor ERRADO tem que
+    # ser pego e comparado (→ ❌), não ignorado silenciosamente.
+    return next((c for c in cnpjs if not re.sub(r"\D", "", c).startswith(_CNPJ_IFF_RAIZ)),
+                cnpjs[0] if cnpjs else None)
+
+def _linha_empenho(doc_empenhos, contrato, dados_of, rotulo_ausente="não citado no documento"):
+    # empenho citado num documento do processo de almoxarifado (NF, encaminhamento, termo de
+    # recebimento, IC...): QUANDO presente, tem que constar no BD E ser o mesmo da OF. Sem empenho
+    # citado -> ➖ (não é falha). Devolve o dict pronto pro linha_tabela.
+    empenhos_bd = empenhos_registrados(contrato) if contrato else []
+    empenhos_of = list((dados_of or {}).get("empenhos") or [])
+    if empenhos_of:
+        fonte_texto, fonte_disp = f"{', '.join(empenhos_of)} (OF pág. {dados_of['pagina']}; BD)", True
+    elif empenhos_bd:
+        fonte_texto, fonte_disp = f"{', '.join(empenhos_bd)} (BD)", True
+    else:
+        fonte_texto, fonte_disp = ("OF não localizada no processo" if contrato else "contrato não encontrado no banco"), False
+
+    if not doc_empenhos:
+        bate = None
+    elif empenhos_of:
+        bate = (set(doc_empenhos) == set(empenhos_of)
+                and bool(empenhos_bd) and all(e in empenhos_bd for e in doc_empenhos))
+    elif empenhos_bd:
+        bate = all(e in empenhos_bd for e in doc_empenhos)  # sem OF localizada, ao menos confere o BD
+    else:
+        bate = None
+    return linha_tabela("Empenho", fonte_texto, fonte_disp,
+                        ", ".join(doc_empenhos) if doc_empenhos else rotulo_ausente, bool(doc_empenhos), bate)
+
+# ------- Almoxarifado / Documento 1: Ordem de Serviço / Fornecimento -------
+
+RE_OF_NUMERO = re.compile(r"Ordem de Servi[çc]o\s*/\s*Fornecimento\s*n[ºo°]\s*(\d+/\d+)", re.IGNORECASE)
+# a OF lista Fornecedor E Contratante no mesmo formato "CNPJ - NOME" (nome pode quebrar em 2 linhas)
+RE_OF_ENTIDADE = re.compile(
+    r"(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})\s*-\s*(.+?)(?=\n(?:Contratante:|Amparo Legal:|\d{2}/\d{2}/\d{4}))",
+    re.DOTALL)
+RE_OF_VIGENCIA = re.compile(r"Vig[êe]ncia Inicial:.*?(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})", re.DOTALL)
+RE_OF_PROCESSO_CONTRATACAO = re.compile(r"\d{5}\.\d{6}/\d{4}-\d{2}")
+RE_OF_OBJETO = re.compile(
+    r"Objeto:\s*\n(.+?)\n(?:Contrato n[ºo°]|2 - INFORMA|Powered by)", re.DOTALL | re.IGNORECASE)
+RE_OF_EMPENHOS_BLOCO = re.compile(
+    r"Empenhos:\s*(.*?)\n\s*(?:Locais de Execu|3 - ITENS)", re.DOTALL | re.IGNORECASE)
+RE_OF_NUMERO_NE = re.compile(r"\d{4}NE\d{6}")
+RE_OF_VALOR_TOTAL = re.compile(r"Valor Total da presente Ordem.*?R\$\s*([\d.,]+)", re.DOTALL | re.IGNORECASE)
+RE_OF_EXECUCAO = re.compile(
+    r"Data de assinatura:.*?(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})",
+    re.DOTALL | re.IGNORECASE)
+RE_OF_SECAO_ITENS = re.compile(
+    r"3 - ITENS DA AUTORIZA[ÇC][ÃA]O DE EXECU[ÇC][ÃA]O\s*(.*?)(?:\n\s*O Valor Total da presente|\n\s*4 - INFORMA|\Z)",
+    re.DOTALL | re.IGNORECASE)
+# item da OF: "Material <num> <desc+unidade, pode quebrar em várias linhas> <qtd> <parcela>
+# <qtd.solic> R$ <unit> \n R$ \n <total>". DOTALL pra descrição multi-linha ("POLPA\nDE\nFRUTA").
+RE_OF_ITEM = re.compile(
+    r"(?:Material|Servi[çc]o)\s+(\d{3,6})\s+(.+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+"
+    r"R\$\s*([\d.,]+)\s*\n\s*R\$\s*\n?\s*([\d.,]+)", re.IGNORECASE | re.DOTALL)
+
+def _split_desc_unidade(bruto):
+    # "POLPA DE FRUTA QUILOGRAMA" -> ("POLPA DE FRUTA", "QUILOGRAMA"); "PÃO" -> ("PÃO", "")
+    d = limpar_espacos(bruto)
+    desc, _, unid = d.rpartition(" ")
+    return (desc, unid) if desc else (d, "")
+
+def _localizar_ordem_fornecimento(paginas):
+    # a OF ocupa 3 páginas no PDF ("1/3".."3/3"): "1 - INFORMAÇÕES DO CONTRATO", "2 - INFORMAÇÕES DA
+    # ORDEM DE SERVIÇO" (+ itens + valor total) e complementares/autorização. Devolve (indice_da_1ª,
+    # texto_das_3_juntas) ou (None, None). Última ocorrência, caso a OF tenha sido refeita.
+    indices = [i for i, t in enumerate(paginas)
+               if "1 - INFORMAÇÕES DO CONTRATO" in t and "Ordem de Serviço / Fornecimento" in t]
+    if not indices:
+        return None, None
+    indice = indices[-1]
+    return indice, remover_duplicatas_consecutivas("\n".join(paginas[indice:indice + 3]))
+
+def obter_dados_of(paginas):
+    # dados da OF que NÃO têm fonte segura no BD e que os próximos documentos do processo de
+    # almoxarifado (NF, Termo de Recebimento, IC) vão conferir contra: nº da OF, valor total,
+    # período de execução e a lista de itens autorizados (não exibida no bloco da OF, guardada aqui
+    # pra uso posterior). None se a OF não está no processo.
+    indice, texto = _localizar_ordem_fornecimento(paginas)
+    if texto is None:
+        return None
+
+    m_num = RE_OF_NUMERO.search(texto)
+    m_valor = RE_OF_VALOR_TOTAL.search(texto)
+    m_exec = RE_OF_EXECUCAO.search(texto)
+    m_secao = RE_OF_SECAO_ITENS.search(texto)
+    itens_texto = m_secao.group(1).strip() if m_secao else ""
+
+    m_bloco_emp = RE_OF_EMPENHOS_BLOCO.search(texto)
+    empenhos = []
+    for ne in (RE_OF_NUMERO_NE.findall(m_bloco_emp.group(1)) if m_bloco_emp else []):
+        if ne not in empenhos:
+            empenhos.append(ne)
+
+    itens = []
+    for pedaco in re.split(r"(?=(?:Material|Servi[çc]o)\s+\d{3,6}\b)", itens_texto):
+        m = RE_OF_ITEM.match(pedaco)
+        if not m:
+            continue
+        desc, unid = _split_desc_unidade(m.group(2))
+        itens.append({
+            "num_item": m.group(1), "descricao": desc, "unidade": unid,
+            "quantidade": m.group(3), "parcela": m.group(4), "quant_solicitada": m.group(5),
+            "valor_unitario": m.group(6), "valor_total": m.group(7),
+        })
+
+    return {
+        "pagina": indice + 1,
+        "numero": m_num.group(1) if m_num else None,
+        "valor_total": m_valor.group(1) if m_valor else None,
+        "assinatura": m_exec.group(1) if m_exec else None,
+        "execucao_inicio": m_exec.group(2) if m_exec else None,
+        "execucao_fim": m_exec.group(3) if m_exec else None,
+        "empenhos": empenhos,
+        "itens_texto": itens_texto,   # seção 3 crua, fallback caso o parse de linha falhe num modelo diferente
+        "itens": itens,
+    }
+
+def _linhas_cabecalho_contrato(texto, contrato):
+    # "INFORMAÇÕES DO CONTRATO" no padrão de 2 colunas (rótulos numa linha, valores interleaved) -
+    # aparece igual na Ordem de Serviço/Fornecimento e no Termo de Recebimento Definitivo. Devolve
+    # 6 linhas contra o BD: Contrato, Fornecedor, CNPJ, Objeto, Vigência, Processo de contratação.
+    linhas = []
+
+    m_contrato = RE_CONTRATO_GENERICO.search(texto)
+    doc_contrato = m_contrato.group(1) if m_contrato else None
+    fonte_contrato = contrato["numero_contrato"] if contrato else None
+    linhas.append(linha_tabela(
+        "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
+        doc_contrato or "não encontrado no documento", bool(doc_contrato),
+        comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
+    ))
+
+    # entre Fornecedor e Contratante (mesmo formato "CNPJ - NOME"), pega o que NÃO é o IFF - assim
+    # um CNPJ de fornecedor errado ainda é pego e comparado (→ ❌), não some
+    entidades = [(c, limpar_espacos(n)) for c, n in RE_OF_ENTIDADE.findall(texto)]
+    fornecedor = next(((c, n) for c, n in entidades if not re.sub(r"\D", "", c).startswith(_CNPJ_IFF_RAIZ)),
+                      entidades[0] if entidades else None)
+    doc_cnpj = fornecedor[0] if fornecedor else None
+    doc_fornecedor = fornecedor[1] if fornecedor else None
+
+    fonte_fornecedor = contrato["nome_contratada"] if contrato else None
+    linhas.append(linha_tabela(
+        "Fornecedor", f"{fonte_fornecedor} (BD)" if fonte_fornecedor else "contrato não encontrado no banco", bool(fonte_fornecedor),
+        doc_fornecedor or "não encontrado no documento", bool(doc_fornecedor),
+        comparar_textos(fonte_fornecedor, doc_fornecedor) if fonte_fornecedor and doc_fornecedor else None,
+    ))
+
+    fonte_cnpj_fmt = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
+    linhas.append(linha_tabela(
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        doc_cnpj or "não encontrado no documento", bool(doc_cnpj),
+        comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
+    ))
+
+    m_objeto = RE_OF_OBJETO.search(texto)
+    doc_objeto = limpar_espacos(m_objeto.group(1)) if m_objeto else None
+    fonte_obj_texto, fonte_obj_disp, bate_obj = _conferir_objeto(contrato, doc_objeto)
+    linhas.append(linha_tabela(
+        "Objeto", fonte_obj_texto, fonte_obj_disp,
+        doc_objeto or "não encontrado no documento", bool(doc_objeto),
+        bate_obj,
+    ))
+
+    fonte_vigencia = None
+    if contrato and contrato.get("vigencia_inicio") and contrato.get("vigencia_fim"):
+        fonte_vigencia = f"{_formatar_data_iso(contrato['vigencia_inicio'])} a {_formatar_data_iso(contrato['vigencia_fim'])}"
+    m_vig = RE_OF_VIGENCIA.search(texto)
+    doc_vigencia = f"{m_vig.group(1)} a {m_vig.group(2)}" if m_vig else None
+    linhas.append(linha_tabela(
+        "Vigência", f"{fonte_vigencia} (BD)" if fonte_vigencia else "contrato não encontrado no banco", bool(fonte_vigencia),
+        doc_vigencia or "não encontrada no documento", bool(doc_vigencia),
+        (fonte_vigencia == doc_vigencia) if fonte_vigencia and doc_vigencia else None,
+    ))
+
+    m_proc = RE_OF_PROCESSO_CONTRATACAO.search(texto)
+    doc_proc = m_proc.group() if m_proc else None
+    fonte_proc = contrato["processo_contratacao"] if contrato else None
+    linhas.append(linha_tabela(
+        "Processo de contratação", f"{fonte_proc} (BD)" if fonte_proc else "contrato não encontrado no banco", bool(fonte_proc),
+        doc_proc or "não encontrado no documento", bool(doc_proc),
+        _mesmos_digitos(fonte_proc, doc_proc) if fonte_proc and doc_proc else None,
+    ))
+    return linhas
+
+def processar_ordem_fornecimento(nome_arquivo, paginas, contrato, dados_of):
+    # Documento 1 do processo de pagamento de almoxarifado. Os itens da OF NÃO entram na tabela
+    # deste bloco (ficam em dados_of["itens"], pra conferir nos documentos seguintes) - aqui só a
+    # conferência do cabeçalho contra o BD + observação com nº da OF / valor total / execução.
+    indice, texto = _localizar_ordem_fornecimento(paginas)
+    if texto is None:
+        return None
+    dados_of = dados_of or {}
+
+    linhas = _linhas_cabecalho_contrato(texto, contrato)
+
+    # fonte segura = só o(s) empenho(s) que a OF está usando, confirmado(s) no BD - não a lista
+    # inteira de empenhos do contrato
+    doc_empenhos = list(dados_of.get("empenhos") or [])
+    empenhos_bd = empenhos_registrados(contrato) if contrato else []
+    validos_bd = [e for e in doc_empenhos if e in empenhos_bd]
+    if validos_bd:
+        fonte_emp_texto, fonte_emp_disp = f"{', '.join(validos_bd)} (BD)", True
+    elif empenhos_bd:
+        fonte_emp_texto, fonte_emp_disp = f"{', '.join(empenhos_bd)} (BD)", True
+    else:
+        fonte_emp_texto, fonte_emp_disp = ("nenhum empenho cadastrado nesse contrato" if contrato else "contrato não encontrado no banco"), False
+    bate_emp = all(e in empenhos_bd for e in doc_empenhos) if doc_empenhos and empenhos_bd else None
+    linhas.append(linha_tabela(
+        "Empenhos", fonte_emp_texto, fonte_emp_disp,
+        ", ".join(doc_empenhos) if doc_empenhos else "não encontrado no documento", bool(doc_empenhos),
+        bate_emp,
+    ))
+
+    # Nº da OF e Valor Total não têm fonte segura no BD (são determinados pela própria OF) - viram
+    # observação e são a referência dos próximos documentos do processo (NF, Termo de Recebimento,
+    # IC). Os itens (dados_of["itens"]) ficam guardados, não entram aqui.
+    observacao = (f"Nº da OF: {dados_of.get('numero') or 'não encontrado'} | "
+                  f"Valor total: {dados_of.get('valor_total') or 'não encontrado'}")
+
+    return montar_tabela(nome_arquivo, "Ordem de Serviço / Fornecimento", indice + 1, linhas, observacao)
+
+# ------- Almoxarifado / Documento 2: Nota Fiscal (DANFE - NF-e de material) -------
+
+# a NF de almoxarifado é uma DANFE (venda de mercadoria), layout totalmente diferente da NFS-e de
+# serviço - regexes dedicados. Página identificada por "DANFE" + "CHAVE DE ACESSO".
+RE_DANFE_NUMERO = re.compile(r"N[ºo°]\.\s*(\d[\d.]+\d)")
+RE_DANFE_CONTRATO = re.compile(r"CONTRATO\s*n?[ºo°]?\s*([\d./]+)", re.IGNORECASE)
+RE_DANFE_OF = re.compile(r"ORDEM DE FORNECIMENTO\s*n?[ºo°]?\s*([\d./]+)", re.IGNORECASE)
+RE_DANFE_EMPENHO = re.compile(r"\d{4}NE\d{6}")
+RE_DANFE_VALOR_NOTA = re.compile(r"V\.?\s*TOTAL DA NOTA\s*\n?\s*([\d.,]+)", re.IGNORECASE)
+RE_DANFE_EMISSAO = re.compile(r"DATA DA EMISS[ÃA]O\s*\n?\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
+RE_DANFE_BANCO = re.compile(
+    r"BANCO\s+(?:([A-Za-zÀ-Úà-ú]+)\s+)?(\d{3,4})\s+AG\.?\s*(\d+)\s+C/C\s*([\d.]+(?:-\d+)?)", re.IGNORECASE)
+# item da DANFE, dentro da seção "DADOS DOS PRODUTOS / SERVIÇOS": CÓDIGO DESCRIÇÃO(pode quebrar de
+# linha) NCM(6-8díg) O/CSOSN CFOP UN QUANT VALOR_UNIT VALOR_TOTAL 0,00 ... - código pode ter 1
+# dígito ("7"); UN até ~12 letras ("LITRO"). A NCM (6-8 dígitos seguidos) é a âncora do fim da descrição.
+RE_DANFE_ITEM = re.compile(
+    r"\s*(\d{1,6})\s+(.+?)\s+\d{6,8}\s+\d{2,4}\s+\d{4}\s+([A-Za-zÀ-Úà-ú]{1,12})\s+"
+    r"([\d.]+,\d+)\s+([\d.]+,\d+)\s+([\d.]+,\d{2})\b", re.DOTALL)
+
+def _localizar_danfe(paginas):
+    indices = [i for i, t in enumerate(paginas) if "DANFE" in t and "CHAVE DE ACESSO" in t]
+    if not indices:
+        return None, None
+    indice = indices[-1]
+    return indice, remover_duplicatas_consecutivas(paginas[indice])
+
+def _num_nf(bruto):
+    # "000.001.019" -> "1019"
+    if not bruto:
+        return None
+    digitos = re.sub(r"\D", "", bruto).lstrip("0")
+    return digitos or "0"
+
+def _fmt_item(item):
+    prefixo = f"[{item['num_item']}] " if item.get("num_item") else ""
+    return f"{prefixo}{item['descricao']}: {item['quantidade']} × {item['valor_unitario']} = {item['valor_total']}"
+
+def _cruzar_por_valor_unitario(itens_of, itens_nf, itens_trd):
+    # alinha os itens dos 3 docs pelo valor unitário (preço contratual, igual nos 3) - devolve
+    # [(chave, item_of|None, item_nf|None, item_trd|None), ...] na ordem em que aparecem
+    def chave(it):
+        v = _valor_para_float((it or {}).get("valor_unitario"))
+        return round(v, 2) if v is not None else None
+    chaves = []
+    for grupo in (itens_of or [], itens_nf or [], itens_trd or []):
+        for it in grupo:
+            k = chave(it)
+            if k is not None and k not in chaves:
+                chaves.append(k)
+    return [(k,
+             next((i for i in (itens_of or []) if chave(i) == k), None),
+             next((i for i in (itens_nf or []) if chave(i) == k), None),
+             next((i for i in (itens_trd or []) if chave(i) == k), None))
+            for k in chaves]
+
+def _somar_itens(itens):
+    return _float_para_valor_br(sum(_valor_para_float(i["valor_total"]) or 0 for i in (itens or [])))
+
+def _bloco_cruzamento_itens(nome_arquivo, dados_of, dados_nf, dados_trd, pendentes=None):
+    # cruza os itens dos documentos de almoxarifado:
+    #   LIMITE = quantidade que ainda pode ser paga - a OF inteira na 1ª NF, ou o que ficou
+    #            PENDENTE (registrado na Observação do contrato) quando a mesma OF volta num
+    #            processo novo. Entrega/pagamento parcial é permitido: NF <= LIMITE.
+    #   NF     = o que foi efetivamente entregue/faturado agora
+    #   TRD    = recebimento definitivo (tem que ser EXATO com a NF)
+    itens_nf  = (dados_nf  or {}).get("itens") or []
+    itens_trd = (dados_trd or {}).get("itens") or []
+    itens_lim = list(pendentes) if pendentes else ((dados_of or {}).get("itens") or [])
+    rotulo_lim = "Pendente" if pendentes else "OF"
+    tot_lim = _somar_itens(pendentes) if pendentes else (dados_of or {}).get("valor_total")
+    if not (itens_lim or itens_nf or itens_trd):
+        return None
+
+    cruzados = _cruzar_por_valor_unitario(itens_lim, itens_nf, itens_trd)
+    linhas = []
+    for k, lim, nf, trd in cruzados:
+        rotulo = ((lim or trd or {}).get("num_item")
+                  or (limpar_espacos((nf or {}).get("descricao", "")) or f"R$ {k:.2f}/un")[:44])
+        col_doc = []
+        if lim:
+            col_doc.append(f"{rotulo_lim}: {lim['quantidade']} × {lim['valor_unitario']} = {lim['valor_total']}")
+        if trd:
+            col_doc.append(f"Receb.: {trd['quantidade']} × {trd['valor_unitario']} = {trd['valor_total']}")
+        fonte_texto = (f"NF: {nf['quantidade']} × {nf['valor_unitario']} = {nf['valor_total']}"
+                       if nf else f"não consta na NF (segue pendente)" if pendentes else "não consta na NF (item não entregue)")
+
+        problemas = []
+        if nf and not lim:
+            problemas.append(f"faturado item fora do {'pendente' if pendentes else 'autorizado na OF'}")
+        if nf and not trd:
+            problemas.append("entregue mas fora do recebimento")
+        if trd and not nf:
+            problemas.append("recebido item não faturado")
+        if nf and trd and not (_valores_monetarios_batem(nf["quantidade"], trd["quantidade"])
+                               and _valores_monetarios_batem(nf["valor_total"], trd["valor_total"])):
+            problemas.append("NF ≠ recebimento (têm que ser exatos)")
+        if nf and lim and not (_valor_ate(nf["quantidade"], lim["quantidade"])
+                               and _valor_ate(nf["valor_total"], lim["valor_total"])):
+            problemas.append(f"NF acima do {'pendente' if pendentes else 'autorizado na OF'}")
+
+        bate = None if (nf is None and trd is None) else (not problemas)
+        col_texto = " | ".join(col_doc) if col_doc else "-"
+        if problemas:
+            col_texto += f"   ⚠ {'; '.join(problemas)}"
+        linhas.append(linha_tabela(f"Item {rotulo}", fonte_texto, bool(nf), col_texto, bool(col_doc), bate))
+
+    tot_nf  = (dados_nf  or {}).get("valor_total")
+    tot_trd = (dados_trd or {}).get("valor_total")
+    prob_tot = []
+    if tot_nf and tot_trd and not _valores_monetarios_batem(tot_nf, tot_trd):
+        prob_tot.append("NF ≠ recebimento")
+    if tot_nf and tot_lim and not _valor_ate(tot_nf, tot_lim):
+        prob_tot.append(f"NF acima do {'pendente' if pendentes else 'autorizado'}")
+    col_tot = " | ".join(p for p in (f"{rotulo_lim}: {tot_lim}" if tot_lim else None,
+                                     f"Receb.: {tot_trd}" if tot_trd else None) if p)
+    if prob_tot:
+        col_tot += f"   ⚠ {'; '.join(prob_tot)}"
+    linha_total = linha_tabela(
+        "Total", f"NF: {tot_nf}" if tot_nf else "NF não localizada", bool(tot_nf),
+        col_tot or "-", bool(tot_lim or tot_trd),
+        (not prob_tot) if (tot_nf and (tot_lim or tot_trd)) else None,
+    )
+    linha_total["destaque"] = True  # linha dos totais - realçada (negrito) na janela
+    linhas.append(linha_total)
+
+    # reconciliação: a soma dos itens NÃO pagos nesta NF tem que fechar com (LIMITE total − NF paga)
+    nao_pagos = [lim for _, lim, nf, _ in cruzados if lim and not nf]
+    f_lim, f_nf = _valor_para_float(tot_lim), _valor_para_float(tot_nf)
+    if nao_pagos and f_lim is not None and f_nf is not None:
+        soma = sum(_valor_para_float(o["valor_total"]) or 0 for o in nao_pagos)
+        dif = f_lim - f_nf
+        rot = "Itens ainda pendentes" if pendentes else "Itens não entregues"
+        linhas.append(linha_tabela(
+            rot,
+            f"{tot_lim} − {tot_nf} = {_float_para_valor_br(dif)} ({rotulo_lim} − NF paga)", True,
+            f"{' + '.join(o['valor_total'] for o in nao_pagos)} = {_float_para_valor_br(soma)}", True,
+            abs(soma - dif) < 0.005,
+        ))
+
+    return montar_tabela(nome_arquivo, "Cruzamento de Itens (OF × NF × Recebimento)", None, linhas)
+
+def _num_curto(numero):
+    # "00004/2026" -> "4/2026" ; "00049" -> "49"
+    return "/".join(re.sub(r"^0+(?=\d)", "", p) for p in (numero or "").split("/"))
+
+# linha "Itens não entregues (OF 4/2026) --> 49) 100x8,40 + 46) 100x9,40 = 940,00" na Observação
+RE_OBS_NAO_ENTREGUES = re.compile(
+    r"^Itens (?:não entregues|ainda pendentes) \(OF ([\d/]+)\)\s*-->\s*(.+?)\s*=\s*[\d.,]+\s*$", re.MULTILINE)
+RE_OBS_ITEM = re.compile(r"(\d+)\)\s*([\d.,]+)\s*x\s*([\d.,]+)")
+
+def _parse_itens_pendentes(observacao, of_num_curto):
+    # lê de volta a linha "Itens não entregues (OF X) --> ..." da Observação -> lista de itens
+    # {num_item, quantidade, valor_unitario, valor_total}. None se não há linha pra essa OF.
+    for m in RE_OBS_NAO_ENTREGUES.finditer(observacao or ""):
+        if m.group(1) != of_num_curto:
+            continue
+        itens = []
+        for ni, q, vu in RE_OBS_ITEM.findall(m.group(2)):
+            fq, fvu = _valor_para_float(q) or 0, _valor_para_float(vu) or 0
+            itens.append({"num_item": ni, "quantidade": q, "valor_unitario": vu,
+                          "valor_total": _float_para_valor_br(fq * fvu)})
+        return itens or None
+    return None
+
+def _registrar_itens_nao_entregues(contrato, dados_of, dados_nf, pendentes=None):
+    # entrega parcial de almoxarifado: mantém na Observação do contrato a linha "Itens não entregues
+    # (OF X) --> ..." com o que AINDA falta pagar daquela OF. 1ª NF: OF inteira menos o que a NF
+    # pagou. NF seguinte da mesma OF: o que estava pendente menos o que esta NF pagou. Quando não
+    # sobra nada, a linha é removida. Só mexe quando a reconciliação fecha (soma == LIMITE − NF).
+    if not (contrato and contrato.get("id") and dados_of and dados_nf):
+        return
+    itens_lim = list(pendentes) if pendentes else (dados_of.get("itens") or [])
+    itens_nf = dados_nf.get("itens") or []
+    if not (itens_lim and itens_nf):
+        return
+    cruzados = _cruzar_por_valor_unitario(itens_lim, itens_nf, [])
+    faltam = [lim for _, lim, nf, _ in cruzados if lim and not nf]  # itens não pagos nesta NF
+
+    tot_lim = _somar_itens(pendentes) if pendentes else dados_of.get("valor_total")
+    f_lim, f_nf = _valor_para_float(tot_lim), _valor_para_float(dados_nf.get("valor_total"))
+    soma = sum(_valor_para_float(o["valor_total"]) or 0 for o in faltam)
+    if f_lim is None or f_nf is None or abs(soma - (f_lim - f_nf)) >= 0.005:
+        return  # reconciliação não fechou - não mexe no BD
+
+    of_num = _num_curto(dados_of.get("numero"))
+    prefixo = f"Itens não entregues (OF {of_num})"
+    if faltam:
+        partes = " + ".join(f"{_num_curto(o['num_item'])}) {o['quantidade']}x{o['valor_unitario']}" for o in faltam)
+        contratos_db.acrescentar_observacao_linha(
+            contrato["id"], prefixo, f"{prefixo} --> {partes} = {_float_para_valor_br(soma)}")
+    elif pendentes:  # zerou a pendência daquela OF - tira a linha
+        contratos_db.acrescentar_observacao_linha(contrato["id"], prefixo, None)
+
+# ------- Almoxarifado: Consistência entre Documentos -------
+# mesma info conferida em documentos distintos do processo tem que ser igual entre si (não só bater
+# isoladamente contra a fonte segura). Varre os blocos já montados.
+_CAMPOS_CONSISTENCIA_ALMOX = {
+    "CNPJ": ["CNPJ"],
+    "Contrato": ["Contrato"],
+    "Fornecedor": ["Fornecedor", "Interessado"],
+    "Objeto": ["Objeto"],
+    "Vigência": ["Vigência"],
+    "Processo de contratação": ["Processo de contratação"],
+    "Processo": ["Processo"],                       # do pagamento (pág. 1)
+    "Nota Fiscal": ["Nota Fiscal"],
+    "Ordem de Fornecimento": ["Ordem de Fornecimento"],
+    "Empenho": ["Empenho", "Empenhos"],
+    "Valor": ["Valor", "Valor Faturado", "Valor Líquido"],
+}
+_COMPARADOR_CONSISTENCIA_ALMOX = {
+    "CNPJ": comparar_cnpjs,
+    "Contrato": comparar_numeros,
+    "Fornecedor": comparar_textos,
+    "Objeto": comparar_textos,
+    "Vigência": lambda a, b: a == b,
+    "Processo de contratação": _mesmos_digitos,
+    "Processo": _mesmos_digitos,
+    "Nota Fiscal": comparar_numeros,
+    "Ordem de Fornecimento": comparar_numeros,
+    "Empenho": _comparar_conjuntos,
+    "Valor": _valores_monetarios_batem,
+}
+_NOMES_CURTOS_DOC_ALMOX = {
+    "Ordem de Serviço / Fornecimento": "OF",
+    "Nota Fiscal": "NF",
+    "Encaminhamento de Material": "Encaminhamento",
+    "Despacho de Ateste de Nota Fiscal de Material": "Despacho Ateste",
+    "Capa de Pagamento": "Capa",
+    "Termo de Recebimento Definitivo": "Recebimento",
+    "Instrumentos de Cobrança": "IC",
+    "Consulta Optante pelo Simples Nacional": "Consulta Optante",
+}
+
+def _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of, dados_nf, processo_p1):
+    dados_of, dados_nf = dados_of or {}, dados_nf or {}
+    fonte_cnpj = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
+    fonte_vig = None
+    if contrato and contrato.get("vigencia_inicio") and contrato.get("vigencia_fim"):
+        fonte_vig = f"{_formatar_data_iso(contrato['vigencia_inicio'])} a {_formatar_data_iso(contrato['vigencia_fim'])}"
+    fonte_obj = (contrato.get("objeto_detalhado") or contrato.get("objeto_resumido")) if contrato else None
+    empenhos_of = ", ".join(dados_of.get("empenhos") or []) or None
+
+    fontes = {
+        "CNPJ": (f"{fonte_cnpj} (BD)" if fonte_cnpj else "—", bool(fonte_cnpj), fonte_cnpj),
+        "Contrato": (f"{contrato['numero_contrato']} (BD)" if contrato and contrato.get("numero_contrato") else "—",
+                     bool(contrato and contrato.get("numero_contrato")), contrato.get("numero_contrato") if contrato else None),
+        "Fornecedor": (f"{contrato['nome_contratada']} (BD)" if contrato and contrato.get("nome_contratada") else "—",
+                       bool(contrato and contrato.get("nome_contratada")), contrato.get("nome_contratada") if contrato else None),
+        "Objeto": (f"{fonte_obj} (BD)" if fonte_obj else "—", bool(fonte_obj), fonte_obj),
+        "Vigência": (f"{fonte_vig} (BD)" if fonte_vig else "—", bool(fonte_vig), fonte_vig),
+        "Processo de contratação": (f"{contrato['processo_contratacao']} (BD)" if contrato and contrato.get("processo_contratacao") else "—",
+                                    bool(contrato and contrato.get("processo_contratacao")),
+                                    contrato.get("processo_contratacao") if contrato else None),
+        "Processo": (f"{processo_p1} (pág. 1)" if processo_p1 else "—", bool(processo_p1), processo_p1),
+        "Nota Fiscal": (f"{dados_nf.get('numero')} (NF)" if dados_nf.get("numero") else "—",
+                        bool(dados_nf.get("numero")), dados_nf.get("numero")),
+        "Ordem de Fornecimento": (f"{dados_of.get('numero')} (OF)" if dados_of.get("numero") else "—",
+                                  bool(dados_of.get("numero")), dados_of.get("numero")),
+        "Empenho": (f"{empenhos_of} (OF)" if empenhos_of else "—", bool(empenhos_of), empenhos_of),
+        "Valor": (f"{dados_nf.get('valor_total')} (NF)" if dados_nf.get("valor_total") else "—",
+                  bool(dados_nf.get("valor_total")), dados_nf.get("valor_total")),
+    }
+
+    linhas = []
+    for campo, rotulos in _CAMPOS_CONSISTENCIA_ALMOX.items():
+        ocorrencias = []
+        for bloco in tabelas:
+            nome_curto = _NOMES_CURTOS_DOC_ALMOX.get(bloco["documento"], bloco["documento"])
+            for linha in bloco["linhas"]:
+                if linha["campo"] in rotulos and linha["documento_disponivel"]:
+                    ocorrencias.append((nome_curto, _valor_comparavel(linha["documento"])))
+        if not ocorrencias:
+            continue
+        fonte_texto, fonte_disp, fonte_valor = fontes[campo]
+        comparador = _COMPARADOR_CONSISTENCIA_ALMOX[campo]
+        referencia = fonte_valor or (ocorrencias[0][1] if len(ocorrencias) >= 2 else None)
+        if referencia is None:
+            bate, doc_texto = None, ocorrencias[0][1]
+        else:
+            divergentes = [(n, v) for n, v in ocorrencias if not comparador(referencia, v)]
+            bate = not divergentes
+            # quando bate, só o valor (já detalhado nos blocos acima); quando não, só o(s)
+            # documento(s) onde está errado
+            doc_texto = ocorrencias[0][1] if bate else " | ".join(f"{n}: {v}" for n, v in divergentes)
+        linhas.append(linha_tabela(campo, fonte_texto, fonte_disp, doc_texto, True, bate))
+
+    if not linhas:
+        return None
+    return montar_tabela(nome_arquivo, "Consistência entre Documentos", None, linhas)
+
+def obter_dados_nf_almoxarifado(paginas):
+    # dados da DANFE que os documentos seguintes (Instrumentos de Cobrança, SIAFI NS) conferem
+    # contra: nº da NF, valor total, emissão e itens. None se não há DANFE no processo.
+    indice, texto = _localizar_danfe(paginas)
+    if texto is None:
+        return None
+    m_num = RE_DANFE_NUMERO.search(texto)
+    m_valor = RE_DANFE_VALOR_NOTA.search(texto)
+    m_emissao = RE_DANFE_EMISSAO.search(texto)
+    # só a seção "DADOS DOS PRODUTOS" (senão o "0 - ENTRADA / 1 - SAÍDA" do topo da DANFE entra
+    # como item). Cada item começa numa linha "<código> <letra...>" (a linha da NCM começa com
+    # 6-8 dígitos + espaço + dígito, então não é confundida).
+    m_prod = re.search(
+        r"DADOS DOS PRODUTOS\s*/?\s*SERVI[ÇC]OS(.*?)(?:DADOS ADICIONAIS|INFORMA[ÇC][ÕO]ES COMPLEMENTARES|RESERVADO AO FISCO|\Z)",
+        texto, re.DOTALL | re.IGNORECASE)
+    secao = m_prod.group(1) if m_prod else texto
+    itens = []
+    for chunk in re.split(r"(?=\n\d{1,6}\s+\D)", "\n" + secao):
+        m = RE_DANFE_ITEM.match(chunk)
+        if m:
+            itens.append({
+                "codigo": m.group(1),
+                "descricao": limpar_espacos(m.group(2)),
+                "unidade": m.group(3),
+                "quantidade": m.group(4),
+                "valor_unitario": m.group(5),
+                "valor_total": m.group(6),
+            })
+    return {
+        "pagina": indice + 1,
+        "numero": _num_nf(m_num.group(1)) if m_num else None,
+        "valor_total": m_valor.group(1) if m_valor else None,
+        "emissao": m_emissao.group(1) if m_emissao else None,
+        "itens": itens,
+    }
+
+def processar_nota_fiscal_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_nf):
+    indice, texto = _localizar_danfe(paginas)
+    if texto is None:
+        return None
+    dados_of = dados_of or {}
+    dados_nf = dados_nf or {}
+
+    linhas = []
+
+    # CNPJ do emitente = o que NÃO é o do IFF/destinatário (a DANFE traz os dois) - assim um CNPJ
+    # de emitente errado ainda é comparado (→ ❌)
+    doc_cnpj = _cnpj_fornecedor(re.findall(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", texto))
+    fonte_cnpj_fmt = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
+    linhas.append(linha_tabela(
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        doc_cnpj or "não encontrado na NF", bool(doc_cnpj),
+        comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
+    ))
+
+    m_contrato = RE_DANFE_CONTRATO.search(texto)
+    doc_contrato = m_contrato.group(1) if m_contrato else None
+    fonte_contrato = contrato["numero_contrato"] if contrato else None
+    # Contrato e Ordem de Fornecimento ficam nas "Informações Complementares" da DANFE - nem toda
+    # NF traz; sem eles é ➖ "não citado", não é falha
+    linhas.append(linha_tabela(
+        "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
+        doc_contrato or "não citado na NF", bool(doc_contrato),
+        comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
+    ))
+
+    m_of = RE_DANFE_OF.search(texto)
+    doc_of = m_of.group(1) if m_of else None
+    fonte_of = dados_of.get("numero")
+    linhas.append(linha_tabela(
+        "Ordem de Fornecimento", f"{fonte_of} (OF pág. {dados_of['pagina']})" if fonte_of else "OF não localizada no processo", bool(fonte_of),
+        doc_of or "não citada na NF", bool(doc_of),
+        comparar_numeros(fonte_of, doc_of) if fonte_of and doc_of else None,
+    ))
+
+    doc_empenhos = []
+    for ne in RE_DANFE_EMPENHO.findall(texto):
+        if ne not in doc_empenhos:
+            doc_empenhos.append(ne)
+    linhas.append(_linha_empenho(doc_empenhos, contrato, dados_of, rotulo_ausente="não citado na NF"))
+
+    m_banco = RE_DANFE_BANCO.search(texto)
+    if m_banco:
+        doc_ag, doc_conta = m_banco.group(3), m_banco.group(4)
+        fonte_ag = contrato["agencia"] if contrato else None
+        fonte_conta = contrato["conta"] if contrato else None
+        tem_fonte = bool(fonte_ag and fonte_conta)
+        fonte_texto = (f"{contrato.get('banco') or '-'} | Ag {fonte_ag} | C/c {fonte_conta} (BD)" if tem_fonte
+                       else ("dados bancários não cadastrados no banco" if contrato else "contrato não encontrado no banco"))
+        doc_texto = f"{m_banco.group(1) or '-'} {m_banco.group(2)} | Ag {doc_ag} | C/c {doc_conta}"
+        bate_dom = (_mesmos_digitos(fonte_ag, doc_ag) and _mesmos_digitos(fonte_conta, doc_conta)) if tem_fonte else None
+        linhas.append(linha_tabela("Domicílio Bancário", fonte_texto, tem_fonte, doc_texto, True, bate_dom))
+
+    # itens e valor total da NF vão pro bloco "Cruzamento de Itens" (OF × NF × Recebimento), no fim
+    observacao = (f"Nº da NF: {dados_nf.get('numero') or 'não encontrado'} | "
+                  f"Emissão: {dados_nf.get('emissao') or 'não encontrada'} | "
+                  f"Valor total: {dados_nf.get('valor_total') or 'não encontrado'}")
+
+    return montar_tabela(nome_arquivo, "Nota Fiscal", indice + 1, linhas, observacao)
+
+# ------- Almoxarifado / Documentos 3 e 4: Encaminhamento de Material e Despacho de Ateste -------
+
+# os dois são ofícios/despachos curtos com a MESMA conferência (NF / empenho / CNPJ / fornecedor
+# contra as fontes seguras) - só muda a página que os identifica. A fonte usa a ligatura "ﬁ"
+# (U+FB01) em "nota ﬁscal" - normalizada pra "fi" antes dos regexes.
+RE_ALMOX_NF = re.compile(r"Nota\s*Fiscal\s*n[ºo°]\s*(\d+)", re.IGNORECASE)
+RE_ALMOX_NE = re.compile(r"\d{4}NE\d{6}")
+RE_ALMOX_CNPJ_FORNECEDOR = re.compile(r"fornecedor\s*\n?\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", re.IGNORECASE)
+RE_ALMOX_FORNECEDOR = re.compile(
+    r"fornecedor\s*\n?\s*\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\s*\n?\s*-\s*\n?\s*(.+?)\s*\.?\s*\n",
+    re.IGNORECASE | re.DOTALL)
+
+def _linhas_ateste_almoxarifado(texto, contrato, dados_of, dados_nf):
+    # 4 linhas comuns ao Encaminhamento de Material e ao Despacho de Ateste: NF, Empenho, CNPJ e
+    # Fornecedor conferidos contra dados_nf / BD / OF.
+    dados_nf = dados_nf or {}
+    linhas = []
+
+    m_nf = RE_ALMOX_NF.search(texto)
+    doc_nf = m_nf.group(1) if m_nf else None
+    fonte_nf = dados_nf.get("numero")
+    linhas.append(linha_tabela(
+        "Nota Fiscal", f"{fonte_nf} (NF pág. {dados_nf['pagina']})" if fonte_nf else "NF não localizada no processo", bool(fonte_nf),
+        doc_nf or "não encontrada no documento", bool(doc_nf),
+        comparar_numeros(fonte_nf, doc_nf) if fonte_nf and doc_nf else None,
+    ))
+
+    doc_empenhos = []
+    for ne in RE_ALMOX_NE.findall(texto):
+        if ne not in doc_empenhos:
+            doc_empenhos.append(ne)
+    linhas.append(_linha_empenho(doc_empenhos, contrato, dados_of))
+
+    # CNPJ do fornecedor: o que vem logo depois de "fornecedor" - assim um CNPJ errado (ex:
+    # "53.194.350" no lugar de "53.094.350") ainda é pego e comparado (→ ❌), não some
+    m_cnpj = RE_ALMOX_CNPJ_FORNECEDOR.search(texto)
+    doc_cnpj = m_cnpj.group(1) if m_cnpj else _cnpj_fornecedor(re.findall(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", texto))
+    fonte_cnpj_fmt = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
+    linhas.append(linha_tabela(
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        doc_cnpj or "não encontrado no documento", bool(doc_cnpj),
+        comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
+    ))
+
+    m_forn = RE_ALMOX_FORNECEDOR.search(texto)
+    doc_forn = limpar_espacos(m_forn.group(1)) if m_forn else None
+    fonte_forn = contrato["nome_contratada"] if contrato else None
+    linhas.append(linha_tabela(
+        "Fornecedor", f"{fonte_forn} (BD)" if fonte_forn else "contrato não encontrado no banco", bool(fonte_forn),
+        doc_forn or "não encontrado no documento", bool(doc_forn),
+        comparar_textos(fonte_forn, doc_forn) if fonte_forn and doc_forn else None,
+    ))
+    return linhas
+
+def _texto_pagina_almox(paginas, indice):
+    return remover_duplicatas_consecutivas(paginas[indice]).replace("ﬁ", "fi").replace("ﬂ", "fl")
+
+def processar_encaminhamento_material(nome_arquivo, paginas, contrato, dados_of, dados_nf):
+    indices = [i for i, t in enumerate(paginas) if "Encaminhamento de material" in t and "OFÍCIO" in t]
+    if not indices:
+        return None
+    indice = indices[-1]
+    linhas = _linhas_ateste_almoxarifado(_texto_pagina_almox(paginas, indice), contrato, dados_of, dados_nf)
+    return montar_tabela(nome_arquivo, "Encaminhamento de Material", indice + 1, linhas)
+
+def processar_despacho_ateste_material(nome_arquivo, paginas, contrato, dados_of, dados_nf):
+    # "Assunto: Despacho de Ateste de Nota Fiscal de Material" também aparece no Termo de Recebimento
+    # Definitivo (que referencia esse despacho) - exige "ATESTO" (o verbo do ato) pra pegar a página certa
+    indices = [i for i, t in enumerate(paginas)
+               if "Despacho de Ateste de Nota Fiscal de Material" in t and "ATESTO" in t]
+    if not indices:
+        return None
+    indice = indices[-1]
+    linhas = _linhas_ateste_almoxarifado(_texto_pagina_almox(paginas, indice), contrato, dados_of, dados_nf)
+    return montar_tabela(nome_arquivo, "Despacho de Ateste de Nota Fiscal de Material", indice + 1, linhas)
+
+# ------- Almoxarifado / Documento 5: Capa de Pagamento -------
+
+RE_CP_PROCESSO = re.compile(r"processo de compra protocolado sob o n[úu]mero:\s*([\d./-]+)", re.IGNORECASE)
+RE_CP_CNPJ = re.compile(r"CNPJ:\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", re.IGNORECASE)
+RE_CP_INTERESSADO = re.compile(r"Interessado:\s*(.+)")
+RE_CP_NF = re.compile(r"N[úu]mero Nota Fiscal:\s*(\d+)", re.IGNORECASE)
+RE_CP_VALOR = re.compile(r"Valor:\s*([\d.,]+)")
+RE_CP_ELEMENTO = re.compile(r"Elemento de Despesa\s+Valor\s*\n\s*(\d{6}[.\-]\d{2})", re.IGNORECASE)
+
+def _natureza_do_empenho(contrato, numero_empenho):
+    # natureza_despesa (ND) cadastrada pro empenho específico - "" (não informada) vira None
+    if not (contrato and numero_empenho):
+        return None
+    todos = list(contrato.get("empenhos", []))
+    for p in contrato.get("processos_empenho", []):
+        todos.extend(p.get("empenhos", []))
+    for e in todos:
+        if e.get("numero_empenho") == numero_empenho:
+            return (e.get("natureza_despesa") or "").strip() or None
+    return None
+
+def _processo_do_empenho(contrato, numero_empenho):
+    # nº do processo de empenho (almoxarifado) que contém o empenho dado - None se não achar
+    if not (contrato and numero_empenho):
+        return None
+    for p in contrato.get("processos_empenho", []):
+        if any(e.get("numero_empenho") == numero_empenho for e in p.get("empenhos", [])):
+            return p.get("numero_processo")
+    return None
+
+def processar_capa_pagamento(nome_arquivo, paginas, contrato, dados_of, dados_nf):
+    # Documento 5: a "Capa de Pagamento" da Coordenação de Almoxarifado. p13 é a versão digitalizada
+    # ("CAPA PAGAMENTO" em caixa alta) - a de conteúdo é a que tem "Capa de Pagamento" + a tabela
+    # "Total por elemento de despesa".
+    indices = [i for i, t in enumerate(paginas)
+               if "Capa de Pagamento" in t and "Total por elemento de despesa" in t]
+    if not indices:
+        return None
+    indice = indices[-1]
+    texto = paginas[indice]
+    dados_of = dados_of or {}
+    dados_nf = dados_nf or {}
+
+    doc_empenhos = []
+    for ne in RE_ALMOX_NE.findall(texto):
+        if ne not in doc_empenhos:
+            doc_empenhos.append(ne)
+    empenho_usado = doc_empenhos[0] if doc_empenhos else None
+
+    linhas = []
+
+    # fonte segura = o processo de empenho a que o empenho DESTE pagamento está vinculado no BD -
+    # não a lista inteira de processos do contrato
+    m_proc = RE_CP_PROCESSO.search(texto)
+    doc_proc = m_proc.group(1) if m_proc else None
+    proc_bd = _processo_do_empenho(contrato, empenho_usado)
+    procs_bd = [p["numero_processo"] for p in contrato.get("processos_empenho", [])] if contrato else []
+    if proc_bd:
+        fonte_proc_texto, fonte_proc_disp = f"{proc_bd} (BD)", True  # o processo vinculado ao empenho usado
+        bate_proc = _mesmos_digitos(proc_bd, doc_proc) if doc_proc else None
+    else:
+        fonte_proc_texto = f"{', '.join(procs_bd)} (BD)" if procs_bd else ("nenhum processo de empenho cadastrado" if contrato else "contrato não encontrado no banco")
+        fonte_proc_disp = bool(procs_bd)
+        bate_proc = any(_mesmos_digitos(p, doc_proc) for p in procs_bd) if procs_bd and doc_proc else None
+    linhas.append(linha_tabela(
+        "Processo de empenho", fonte_proc_texto, fonte_proc_disp,
+        doc_proc or "não encontrado no documento", bool(doc_proc),
+        bate_proc,
+    ))
+
+    m_cnpj = RE_CP_CNPJ.search(texto)
+    doc_cnpj = m_cnpj.group(1) if m_cnpj else None
+    fonte_cnpj_fmt = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
+    linhas.append(linha_tabela(
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        doc_cnpj or "não encontrado no documento", bool(doc_cnpj),
+        comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
+    ))
+
+    m_int = RE_CP_INTERESSADO.search(texto)
+    doc_int = limpar_espacos(m_int.group(1)) if m_int else None
+    fonte_forn = contrato["nome_contratada"] if contrato else None
+    linhas.append(linha_tabela(
+        "Interessado", f"{fonte_forn} (BD)" if fonte_forn else "contrato não encontrado no banco", bool(fonte_forn),
+        doc_int or "não encontrado no documento", bool(doc_int),
+        comparar_textos(fonte_forn, doc_int) if fonte_forn and doc_int else None,
+    ))
+
+    m_nf = RE_CP_NF.search(texto)
+    doc_nf = _num_nf(m_nf.group(1)) if m_nf else None
+    fonte_nf = dados_nf.get("numero")
+    linhas.append(linha_tabela(
+        "Nota Fiscal", f"{fonte_nf} (NF pág. {dados_nf['pagina']})" if fonte_nf else "NF não localizada no processo", bool(fonte_nf),
+        doc_nf or "não encontrada no documento", bool(doc_nf),
+        comparar_numeros(fonte_nf, doc_nf) if fonte_nf and doc_nf else None,
+    ))
+
+    linhas.append(_linha_empenho(doc_empenhos, contrato, dados_of))
+
+    # o Valor da capa é o valor efetivamente pago = o da NF (não o autorizado na OF, que pode ser maior)
+    m_valor = RE_CP_VALOR.search(texto)
+    doc_valor = m_valor.group(1) if m_valor else None
+    fonte_valor = dados_nf.get("valor_total")
+    linhas.append(linha_tabela(
+        "Valor", f"{fonte_valor} (NF pág. {dados_nf['pagina']})" if fonte_valor else "NF não localizada no processo", bool(fonte_valor),
+        doc_valor or "não encontrado no documento", bool(doc_valor),
+        _valores_monetarios_batem(fonte_valor, doc_valor) if fonte_valor and doc_valor else None,
+    ))
+
+    m_elem = RE_CP_ELEMENTO.search(texto)
+    doc_nat = m_elem.group(1) if m_elem else None
+    fonte_nat = _natureza_do_empenho(contrato, doc_empenhos[0]) if doc_empenhos else None
+    naturezas_bd = naturezas_despesa_registradas(contrato) if contrato else []
+    if fonte_nat:
+        fonte_nat_texto, fonte_nat_disp = f"{fonte_nat} (BD)", True
+        bate_nat = _mesmos_digitos(fonte_nat, doc_nat) if doc_nat else None
+    elif naturezas_bd:
+        fonte_nat_texto, fonte_nat_disp = f"{', '.join(naturezas_bd)} (BD)", True
+        bate_nat = any(_mesmos_digitos(n, doc_nat) for n in naturezas_bd) if doc_nat else None
+    else:
+        fonte_nat_texto, fonte_nat_disp = ("nenhuma ND cadastrada" if contrato else "contrato não encontrado no banco"), False
+        bate_nat = None
+    linhas.append(linha_tabela(
+        "Natureza de Despesa", fonte_nat_texto, fonte_nat_disp,
+        doc_nat or "não encontrada no documento", bool(doc_nat),
+        bate_nat,
+    ))
+
+    return montar_tabela(nome_arquivo, "Capa de Pagamento", indice + 1, linhas)
+
+# ------- Almoxarifado / Documento 6: Termo de Recebimento Definitivo -------
+
+RE_TRD_OSF = re.compile(r"(\d{5}/\d{4})\s+Material\s+\d{4,6}", re.IGNORECASE)
+RE_TRD_VALOR_TOTAL_DEF = re.compile(
+    r"valor total.*?termo de recebimento provis[óo]rio.*?R\$\s*([\d.,]+)", re.DOTALL | re.IGNORECASE)
+
+def _localizar_trd(paginas):
+    indices = [i for i, t in enumerate(paginas)
+               if "Termo de Recebimento Definitivo nº" in t and "1 - TERMO DE RECEBIMENTO DEFINITIVO" in t]
+    if not indices:
+        return None, None
+    indice = indices[-1]
+    return indice, remover_duplicatas_consecutivas("\n".join(paginas[indice:indice + 4]))
+
+def obter_dados_trd(paginas):
+    # itens do Termo de Recebimento Definitivo (o que foi DEFINITIVAMENTE recebido - tem que ser
+    # exato com a NF). Cada item na seção "3 - TERMOS RECEBIMENTO PROVISÓRIO": começa com
+    # "<OS/F> Material <num> <desc> <unid>" e a quantidade que vale é "Quantidade Informada".
+    indice, texto = _localizar_trd(paginas)
+    if texto is None:
+        return None
+    m_sec = re.search(r"3 - TERMOS RECEBIMENTO PROVIS[ÓO]RIO(.*?)(?:\n\s*[4-6] - |\Z)", texto, re.DOTALL | re.IGNORECASE)
+    secao = m_sec.group(1) if m_sec else texto
+    itens = []
+    for pedaco in re.split(r"(?=\d{5}/\d{4}\s+Material\s+\d{4,6}\b)", secao):
+        m_id = re.match(r"\d{5}/\d{4}\s+Material\s+(\d{4,6})\s+(.+?)\s+([A-Za-zÀ-Úà-ú]+)\s*(?:\n|$)", pedaco, re.DOTALL)
+        m_qi = re.search(r"Quantidade Informada:\s*([\d.,]+)", pedaco, re.IGNORECASE)
+        m_vu = re.search(r"Valor Unit[áa]rio:\s*R\$\s*([\d.,]+)", pedaco, re.IGNORECASE)
+        m_vt = re.search(r"Valor Total:\s*R\$\s*([\d.,]+)", pedaco, re.IGNORECASE)
+        if m_id and (m_qi or m_vu or m_vt):
+            desc, _u = _split_desc_unidade(f"{m_id.group(2)} {m_id.group(3)}")
+            itens.append({
+                "num_item": m_id.group(1), "descricao": desc,
+                "quantidade": m_qi.group(1) if m_qi else None,
+                "valor_unitario": m_vu.group(1) if m_vu else None,
+                "valor_total": m_vt.group(1) if m_vt else None,
+            })
+    m_tot = RE_TRD_VALOR_TOTAL_DEF.search(texto)
+    return {"pagina": indice + 1, "valor_total": m_tot.group(1) if m_tot else None, "itens": itens}
+
+def processar_termo_recebimento_definitivo(nome_arquivo, paginas, contrato, dados_of, processo_p1):
+    # Documento 6. Ocupa 4 páginas. Cabeçalho igual ao da OF; os ITENS e o VALOR vão pro bloco
+    # "Cruzamento de Itens" (OF × NF × Recebimento), no fim - aqui só cabeçalho + Processo + OF.
+    indice, texto = _localizar_trd(paginas)
+    if texto is None:
+        return None
+    dados_of = dados_of or {}
+
+    linhas = _linhas_cabecalho_contrato(texto, contrato)
+
+    # Processo (de pagamento) - o TRD é o único doc de almoxarifado que cita o processo do PDF
+    m_proc_pag = ns.RE_PROCESSO.search(texto)
+    doc_proc_pag = m_proc_pag.group() if m_proc_pag else None
+    linhas.append(linha_tabela(
+        "Processo", f"{processo_p1} (pág. 1)" if processo_p1 else "não encontrado", bool(processo_p1),
+        doc_proc_pag or "não encontrado no documento", bool(doc_proc_pag),
+        comparar_textos(processo_p1, doc_proc_pag) if processo_p1 and doc_proc_pag else None,
+    ))
+
+    m_osf = RE_TRD_OSF.search(texto)
+    doc_osf = m_osf.group(1) if m_osf else None
+    fonte_of = dados_of.get("numero")
+    linhas.append(linha_tabela(
+        "Ordem de Fornecimento", f"{fonte_of} (OF pág. {dados_of['pagina']})" if fonte_of else "OF não localizada no processo", bool(fonte_of),
+        doc_osf or "não encontrada no documento", bool(doc_osf),
+        comparar_numeros(fonte_of, doc_osf) if fonte_of and doc_osf else None,
+    ))
+
+    return montar_tabela(nome_arquivo, "Termo de Recebimento Definitivo", indice + 1, linhas)
+
+# ------- Almoxarifado / Documento 7: Instrumentos de Cobrança (contratos.gov.br) -------
+
+RE_IC_CONTRATO = re.compile(r"Contrato:\s*([\d./]+)")
+RE_IC_NUMERO = re.compile(r"N[úu]mero:\s*(\d+)", re.IGNORECASE)
+RE_IC_EMISSAO = re.compile(r"Dt\.\s*Emiss[ãa]o:\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
+RE_IC_VALOR_FAT = re.compile(r"Valor Faturado:\s*R\$\s*([\d.,]+)", re.IGNORECASE)
+RE_IC_VALOR_LIQ = re.compile(r"Valor L[íi]quido:\s*R\$\s*([\d.,]+)", re.IGNORECASE)
+# subelemento na tabela "Empenhos:" da IC - "2026NE510407 07 - GENEROS DE ALIMENTACAO R$ 148,40"
+RE_IC_SUBELEMENTO = re.compile(r"\d{4}NE\d{6}\s+(\d{1,3})\s*-\s*\w", re.IGNORECASE)
+# RE_IC_OPTANTE e _linha_optante_simples ficam na seção de serviço (Documento 3) - compartilhados
+
+def _subelemento_do_empenho(contrato, numero_empenho):
+    # últimos dígitos da natureza de despesa do empenho - o que vem DEPOIS do "-" no BD
+    # ("339030-07" -> "07"). None se a ND não tem "-" (não dá pra isolar o subelemento).
+    nat = _natureza_do_empenho(contrato, numero_empenho)
+    if not nat or "-" not in nat:
+        return None
+    return nat.split("-")[-1].strip()
+
+def _competencia_de_data(data_br):
+    # "24/07/2026" -> "Julho/2026"
+    m = re.match(r"\d{2}/(\d{2})/(\d{4})", data_br or "")
+    if not m or not (1 <= int(m.group(1)) <= 12):
+        return None
+    return f"{_MESES_NOME[int(m.group(1))]}/{m.group(2)}"
+
+def processar_instrumento_cobranca_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_nf, processo_p1, dados_optante):
+    # IC do contratos.gov.br (mesma tela que a de serviço, mas sem PARECER como fonte). p21 é a
+    # versão digitalizada ("Registro de IC") - a de conteúdo tem "Valor Faturado" + "Dt. Emissão".
+    indices = [i for i, t in enumerate(paginas)
+               if "Instrumentos de cobrança" in t and "Valor Faturado" in t and "Dt. Emissão" in t]
+    if not indices:
+        return None
+    indice = indices[-1]
+    texto = paginas[indice]
+    dados_of = dados_of or {}
+    dados_nf = dados_nf or {}
+
+    linhas = []
+
+    m_contrato = RE_IC_CONTRATO.search(texto)
+    doc_contrato = m_contrato.group(1) if m_contrato else None
+    fonte_contrato = contrato["numero_contrato"] if contrato else None
+    linhas.append(linha_tabela(
+        "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
+        doc_contrato or "não encontrado no documento", bool(doc_contrato),
+        comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
+    ))
+
+    m_proc = ns.RE_PROCESSO.search(texto)
+    doc_proc = m_proc.group() if m_proc else None
+    linhas.append(linha_tabela(
+        "Processo", f"{processo_p1} (pág. 1)" if processo_p1 else "não encontrado", bool(processo_p1),
+        doc_proc or "não encontrado no documento", bool(doc_proc),
+        comparar_textos(processo_p1, doc_proc) if processo_p1 and doc_proc else None,
+    ))
+
+    m_nf = RE_IC_NUMERO.search(texto)
+    doc_nf = _num_nf(m_nf.group(1)) if m_nf else None
+    fonte_nf = dados_nf.get("numero")
+    linhas.append(linha_tabela(
+        "Nota Fiscal", f"{fonte_nf} (NF pág. {dados_nf['pagina']})" if fonte_nf else "NF não localizada no processo", bool(fonte_nf),
+        doc_nf or "não encontrada no documento", bool(doc_nf),
+        comparar_numeros(fonte_nf, doc_nf) if fonte_nf and doc_nf else None,
+    ))
+
+    m_em = RE_IC_EMISSAO.search(texto)
+    doc_em = m_em.group(1) if m_em else None
+    fonte_em = dados_nf.get("emissao")
+    linhas.append(linha_tabela(
+        "Dt. Emissão", f"{fonte_em} (NF pág. {dados_nf['pagina']})" if fonte_em else "NF não localizada no processo", bool(fonte_em),
+        doc_em or "não encontrada no documento", bool(doc_em),
+        (fonte_em == doc_em) if fonte_em and doc_em else None,
+    ))
+
+    doc_empenhos = []
+    for ne in RE_ALMOX_NE.findall(texto):
+        if ne not in doc_empenhos:
+            doc_empenhos.append(ne)
+    linhas.append(_linha_empenho(doc_empenhos, contrato, dados_of))
+
+    # Subelemento = os dígitos depois do "-" na ND do empenho no BD ("339030-07" -> "07")
+    m_sub = RE_IC_SUBELEMENTO.search(texto)
+    doc_sub = m_sub.group(1) if m_sub else None
+    fonte_sub = _subelemento_do_empenho(contrato, doc_empenhos[0]) if doc_empenhos else None
+    linhas.append(linha_tabela(
+        "Subelemento",
+        f"{fonte_sub} (BD)" if fonte_sub else "subelemento não isolável na ND do banco",
+        bool(fonte_sub),
+        doc_sub or "não encontrado no documento", bool(doc_sub),
+        _mesmos_digitos(fonte_sub, doc_sub) if fonte_sub and doc_sub else None,
+    ))
+
+    # Mês/Ano Referência vs mês da emissão da NF (não há PARECER/competência formal no almoxarifado)
+    doc_comp_bruto, doc_comp = extrair_competencia_documento(texto, aceitar_numerico=True)
+    fonte_comp = _competencia_de_data(dados_nf.get("emissao"))
+    linhas.append(linha_tabela(
+        "Competência", f"{fonte_comp} (mês da emissão da NF)" if fonte_comp else "NF não localizada no processo", bool(fonte_comp),
+        exibir_competencia(doc_comp_bruto, doc_comp) or "não encontrada no documento", bool(doc_comp_bruto),
+        (fonte_comp == doc_comp) if fonte_comp and doc_comp else None,
+    ))
+
+    # Valor Faturado/Líquido da IC = o efetivamente faturado = o da NF (não o autorizado na OF)
+    fonte_valor = dados_nf.get("valor_total")
+    for rotulo, m in (("Valor Faturado", RE_IC_VALOR_FAT.search(texto)), ("Valor Líquido", RE_IC_VALOR_LIQ.search(texto))):
+        doc_v = m.group(1) if m else None
+        linhas.append(linha_tabela(
+            rotulo, f"{fonte_valor} (NF pág. {dados_nf['pagina']})" if fonte_valor else "NF não localizada no processo", bool(fonte_valor),
+            doc_v or "não encontrado no documento", bool(doc_v),
+            _valores_monetarios_batem(fonte_valor, doc_v) if fonte_valor and doc_v else None,
+        ))
+
+    linhas.append(_linha_optante_simples(texto, dados_optante))
+
+    return montar_tabela(nome_arquivo, "Instrumentos de Cobrança", indice + 1, linhas)
+
+def _conformidade_almoxarifado(nome_arquivo, paginas, contrato, processo_p1):
+    # cada documento produz dados de referência (dados_of, dados_nf, ...) que os seguintes conferem
+    # contra. Implementado documento a documento; os demais entram aqui conforme forem definidos.
+    dados_of = obter_dados_of(paginas)
+    dados_nf = obter_dados_nf_almoxarifado(paginas)
+    dados_trd = obter_dados_trd(paginas)
+    dados_optante = obter_dados_optante(paginas)
+
+    doc_ausente = lambda nome: _bloco_ausente(nome_arquivo, nome, None, motivo="Documento não detectado no processo")
+    tabelas = [
+        processar_ordem_fornecimento(nome_arquivo, paginas, contrato, dados_of) or doc_ausente("Ordem de Serviço / Fornecimento"),
+        processar_nota_fiscal_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_nf) or doc_ausente("Nota Fiscal"),
+        processar_encaminhamento_material(nome_arquivo, paginas, contrato, dados_of, dados_nf) or doc_ausente("Encaminhamento de Material"),
+        processar_despacho_ateste_material(nome_arquivo, paginas, contrato, dados_of, dados_nf) or doc_ausente("Despacho de Ateste de Nota Fiscal de Material"),
+        processar_capa_pagamento(nome_arquivo, paginas, contrato, dados_of, dados_nf) or doc_ausente("Capa de Pagamento"),
+        processar_termo_recebimento_definitivo(nome_arquivo, paginas, contrato, dados_of, processo_p1) or doc_ausente("Termo de Recebimento Definitivo"),
+        processar_instrumento_cobranca_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_nf, processo_p1, dados_optante) or doc_ausente("Instrumentos de Cobrança"),
+        # a tela da Receita "Consulta Optante pelo Simples Nacional" (imagem/OCR) é igual à de
+        # serviço - reaproveita o mesmo processador
+        processar_consulta_optante(nome_arquivo, paginas, contrato) or doc_ausente("Consulta Optante pelo Simples Nacional"),
+    ]
+    consistencia = _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of, dados_nf, processo_p1)
+    if consistencia:
+        tabelas.append(consistencia)
+    # se a Observação do contrato já tem itens pendentes desta MESMA OF (de um processo anterior),
+    # é contra eles que a nova NF é cruzada - não contra a OF inteira
+    of_num_curto = _num_curto((dados_of or {}).get("numero"))
+    pendentes = _parse_itens_pendentes(contrato.get("observacao"), of_num_curto) if (contrato and of_num_curto) else None
+
+    cruzamento = _bloco_cruzamento_itens(nome_arquivo, dados_of, dados_nf, dados_trd, pendentes)
+    if cruzamento:
+        tabelas.append(cruzamento)
+        _registrar_itens_nao_entregues(contrato, dados_of, dados_nf, pendentes)  # atualiza a pendência no BD
+    return tabelas
 
 # ------- ponto de entrada -------
 
@@ -1251,23 +2481,47 @@ def gerar_conformidade(nome_arquivo, paginas):
     processo_p1 = match_processo_p1.group() if match_processo_p1 else None
 
     contrato = localizar_contrato(paginas)
+    if (contrato or {}).get("tipo_contrato") == "almoxarifado":
+        return _conformidade_almoxarifado(nome_arquivo, paginas, contrato, processo_p1)
+
     dados_nf = obter_dados_nf(paginas)
     solicitar_dados_manuais_nf(nome_arquivo, dados_nf)
     dados_parecer = obter_dados_parecer(paginas)
+    dados_optante = obter_dados_optante(paginas)  # tela da Receita = fonte segura do Optante pelo Simples (ver IC)
+
+    # contrato sem mão de obra não tem IMR nem Termo Circunstanciado do Gestor (a conferência
+    # começa na NF) - nesses dois o placeholder de "não detectado" é suprimido; se ainda assim o
+    # documento aparecer no PDF, o bloco real é mostrado normalmente. tem_mao_de_obra vem do
+    # cadastro do contrato (fonte segura): só 0 suprime - 1, não informado ou contrato não
+    # encontrado mantêm a cobrança dos 7.
+    sem_mao_de_obra = bool(contrato) and contrato.get("tem_mao_de_obra") == 0
 
     tabelas = []
-    for funcao in (
-        lambda: processar_relatorio_avaliacao_medicao(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer),
-        lambda: processar_termo_circunstanciado(nome_arquivo, paginas, contrato),
-        lambda: processar_nota_fiscal(nome_arquivo, dados_nf, dados_parecer, contrato),
-        lambda: processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer),
-        lambda: processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf, dados_parecer),
-        lambda: processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer),
-        lambda: processar_consulta_optante(nome_arquivo, paginas, contrato),
+    for nome_documento, sigla, so_com_mao_de_obra, funcao in (
+        ("Relatório de Avaliação e Medição dos Resultados", "IMR", True,
+         lambda: processar_relatorio_avaliacao_medicao(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer)),
+        ("Termo Circunstanciado do Gestor do Contrato", None, True,
+         lambda: processar_termo_circunstanciado(nome_arquivo, paginas, contrato)),
+        ("Nota Fiscal", None, False,
+         lambda: processar_nota_fiscal(nome_arquivo, dados_nf, dados_parecer, contrato, sem_mao_de_obra)),
+        ("Relatório Circunstanciado de Recebimento Provisório", None, False,
+         lambda: processar_relatorio_circunstanciado(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer)),
+        ("Despacho de Ateste de Nota Fiscal de Serviço", None, False,
+         lambda: processar_despacho_ateste(nome_arquivo, paginas, contrato, dados_nf, dados_parecer)),
+        ("Instrumentos de Cobrança", None, False,
+         lambda: processar_instrumento_cobranca(nome_arquivo, paginas, processo_p1, contrato, dados_nf, dados_parecer, dados_optante)),
+        ("Consulta Optante pelo Simples Nacional", None, False,
+         lambda: processar_consulta_optante(nome_arquivo, paginas, contrato)),
     ):
-        tabela = funcao()
-        if tabela:
-            tabelas.append(tabela)
+        bloco = funcao()
+        if not bloco:
+            if so_com_mao_de_obra and sem_mao_de_obra:
+                continue  # não existe pra contrato sem mão de obra - não cobra
+            # documento não localizado entra na MESMA posição, como placeholder (ver _bloco_ausente)
+            bloco = _bloco_ausente(nome_arquivo, nome_documento, dados_parecer)
+        if sigla:
+            bloco["sigla"] = sigla
+        tabelas.append(bloco)
 
     consistencia = processar_consistencia_documentos(nome_arquivo, tabelas, processo_p1, contrato, dados_nf, dados_parecer)
     if consistencia:
@@ -1377,6 +2631,7 @@ HTML_CONFORMIDADE = r"""
     --pine-tint-strong: #c3ecd6;
     --status-error: #d1453d;
     --status-error-tint: #fbe9e8;
+    --azul-doc: #1d6fb8;
     --shadow-1: 0 1px 2px rgba(20,32,27,0.07), 0 1px 1px rgba(20,32,27,0.05);
   }
 
@@ -1424,19 +2679,24 @@ HTML_CONFORMIDADE = r"""
     border: 1px solid var(--hairline); border-radius: 10px; background: var(--pine-tint);
     box-shadow: var(--shadow-1); padding: 14px 16px; margin-bottom: 14px;
   }
-  .painel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--pine-deep); display: flex; align-items: baseline; gap: 6px; }
+  .painel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--azul-doc); display: flex; align-items: baseline; gap: 6px; }
+  .painel h2 .sigla-doc { font-weight: 400; color: var(--azul-doc); font-size: 12px; }
   .painel h2 .pagina-doc { font-weight: 400; color: var(--ink-faint); font-size: 12px; }
   .observacao { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--pine-tint-strong); font-size: 12.5px; font-weight: 600; color: var(--status-error); }
+  .observacao--solta { margin-top: 0; padding-top: 0; border-top: none; }
 
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px 10px; font-size: 12.5px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
   th { color: var(--ink-soft); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.02em; }
   tr:last-child td { border-bottom: none; }
   td.campo { font-weight: 400; white-space: nowrap; }
+  tr.linha--destaque td.campo { font-weight: 700; }
+  tr.linha--destaque .valor { font-weight: 700; }
   td.resultado { text-align: center; width: 40px; }
 
   .valor { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
   .valor--indisponivel { font-family: inherit; font-style: italic; color: var(--ink-faint); }
+  .valor--erro { color: var(--status-error); font-weight: 700; }
 
   .badge { display: inline-flex; align-items: center; justify-content: center; }
   .badge--ok { color: var(--pine-deep); }
@@ -1466,20 +2726,20 @@ HTML_CONFORMIDADE = r"""
     indefinido: '<span class="badge badge--indefinido" title="Não foi possível comparar"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 12h10"/></svg></span>',
   };
 
-  function celulaValor(texto, disponivel) {
-    const classe = disponivel ? "valor" : "valor valor--indisponivel";
+  function celulaValor(texto, disponivel, erro) {
     const spanTexto = document.createElement("span");
-    spanTexto.className = classe;
+    spanTexto.className = "valor" + (disponivel ? "" : " valor--indisponivel") + (erro ? " valor--erro" : "");
     spanTexto.textContent = texto;
     return spanTexto.outerHTML;
   }
 
   function montarTabelaLinhas(linhas) {
+    // numa linha que não confere (❌), o valor do lado "Documento" (o dado errado) vai em vermelho
     const corpo = linhas.map((linha) => `
-      <tr>
+      <tr class="${linha.destaque ? "linha--destaque" : ""}">
         <td class="campo">${linha.campo}</td>
         <td>${celulaValor(linha.fonte, linha.fonte_disponivel)}</td>
-        <td>${celulaValor(linha.documento, linha.documento_disponivel)}</td>
+        <td>${celulaValor(linha.documento, linha.documento_disponivel, linha.resultado === "nao")}</td>
         <td class="resultado">${BADGES[linha.resultado]}</td>
       </tr>
     `).join("");
@@ -1492,12 +2752,17 @@ HTML_CONFORMIDADE = r"""
   }
 
   function montarPainelDocumento(bloco) {
-    const observacao = bloco.observacao ? `<p class="observacao">${bloco.observacao}</p>` : "";
     const pagina = bloco.pagina ? `<span class="pagina-doc">pág. ${bloco.pagina}</span>` : "";
+    const sigla = bloco.sigla ? `<span class="sigla-doc">(${bloco.sigla})</span>` : "";
+    const tabela = bloco.linhas.length ? montarTabelaLinhas(bloco.linhas) : "";
+    // sem tabela (documento não localizado), a observação vira o conteúdo do painel - tira o
+    // divisor/respiro que ela ganha quando vem logo abaixo de uma tabela
+    const classeObs = tabela ? "observacao" : "observacao observacao--solta";
+    const observacao = bloco.observacao ? `<p class="${classeObs}">${bloco.observacao}</p>` : "";
     return `
       <div class="painel">
-        <h2>${bloco.documento} ${pagina}</h2>
-        ${montarTabelaLinhas(bloco.linhas)}
+        <h2>${bloco.documento} ${sigla} ${pagina}</h2>
+        ${tabela}
         ${observacao}
       </div>
     `;
@@ -1551,9 +2816,10 @@ HTML_CONFORMIDADE = r"""
 def abrir_janela(blocos, aviso):
     # cria a janela em cima da instância de webview já em execução (a principal do gui.py) -
     # os dados já foram calculados antes de chamar essa função, a janela só renderiza
+    x, y, largura, altura = janela_windows.geometria_para_tela(1040, 780)
     webview.create_window(
         "CCRGCI - Resultado da Conformidade (NS)", html=HTML_CONFORMIDADE,
-        js_api=ApiConformidade(blocos, aviso), width=1040, height=780,
+        js_api=ApiConformidade(blocos, aviso), width=largura, height=altura, x=x, y=y,
     )
 
 def main(nome_planilha=None):
