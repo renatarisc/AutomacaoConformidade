@@ -16,6 +16,7 @@ import preencher_planilha_ro
 import preencher_planilha_ns
 import cadastrar_contrato
 import conformidade
+import conformidade_ro
 
 # comando que abre o Chrome em modo de depuração remota (porta 9222), exigido pelos
 # scripts que se conectam via options.debugger_address - ver comentário no topo de cada main()
@@ -48,6 +49,15 @@ OPCOES = [
         "titulo": "Preencher Planilha de Controle (RO)",
         "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
         "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
+    },
+    {
+        "arquivo": "conformidade_ro.py",
+        "modulo": conformidade_ro,
+        "coluna": 2,
+        "icone": ICONE_CONFERENCIA,
+        "titulo": "Fazer Conformidade (RO)",
+        "descricao": "Cara-Crachá: Documentos preenchidos x Fontes seguras.",
+        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; senão, PDFs baixados.",
     },
     {
         "arquivo": "preencher_planilha_ns.py",
