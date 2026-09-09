@@ -6,11 +6,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 from google.oauth2.service_account import Credentials
 import gspread # para manipular as planilhas do Drive
-import pandas as pd
 import time # para fazer pausa
 
 import carregar_cores_planilha
 import escolher_planilha
+import ler_planilha
 import pintar_celula_planilha
 
 def eh_cinza(cor, tolerancia=0.01):
@@ -43,7 +43,7 @@ def main(nome_planilha=None):
     planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
     aba = planilha.worksheet("NS")
 
-    dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
+    dados = ler_planilha.carregar_registros(aba) # 1ª linha vira cabeçalho, resto como texto; ignora colunas sem nome no cabeçalho
     cores = carregar_cores_planilha.executar(aba) # chama a def
 
     # as colunas OB ISS e OB PG guardam a OP relacionada pelo relacionar_valor_op.py; aqui ela é trocada pela OB

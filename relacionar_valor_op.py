@@ -6,10 +6,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support.ui import Select
 from google.oauth2.service_account import Credentials
 import gspread # para manipular as planilhas do Drive
-import pandas as pd
 import time
 
 import escolher_planilha
+import ler_planilha
 import pintar_celula_planilha
 
 def valor_brl_para_float(valor_str):
@@ -40,7 +40,7 @@ def main(nome_planilha=None):
     planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
     aba = planilha.worksheet("NS")
 
-    dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
+    dados = ler_planilha.carregar_registros(aba) # 1ª linha vira cabeçalho, resto como texto; ignora colunas sem nome no cabeçalho
 
     # porque cada tipo de valor tem sua própria coluna de valor e sua própria coluna de OB de destino -
     # coluna_ob calculada pelo nome do cabeçalho, não fixa, pra não quebrar se a coluna mudar de lugar

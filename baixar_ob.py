@@ -3,11 +3,11 @@ from pathlib import Path
 from pypdf import PdfReader # pip install pypdf - lê o texto do PDF baixado para conferir a OB
 import pyautogui
 import gspread # para manipular as planilhas do Drive
-import pandas as pd
 import time
 
 import carregar_cores_planilha
 import escolher_planilha
+import ler_planilha
 import pintar_celula_planilha
 
 PASTA_DOWNLOADS = Path.home() / "Downloads" # pasta onde o Sistema salva o PDF da OB (nome sequencial: 00000001.pdf, 00000002.pdf...)
@@ -69,7 +69,7 @@ def main(nome_planilha=None):
     planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
     aba = planilha.worksheet("NS")
 
-    dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
+    dados = ler_planilha.carregar_registros(aba) # 1ª linha vira cabeçalho, resto como texto; ignora colunas sem nome no cabeçalho
     cores = carregar_cores_planilha.executar(aba) # chama a def
 
     # a cor amarelo claro 1 sinaliza que a OB (ISS ou PG) já foi relacionada pelo relacionar_op_ob.py e ainda precisa
