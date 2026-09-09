@@ -33,8 +33,7 @@ def main(nome_planilha=None):
     credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
     gc = gspread.authorize(credenciais)
     planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
-    # aba = planilha.worksheet("RO")
-    aba = planilha.worksheet("TesteRO")
+    aba = planilha.worksheet("RO")
 
     dados = pd.DataFrame(aba.get_all_records()) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
     cores = carregar_cores_planilha.executar(aba) # chama a def

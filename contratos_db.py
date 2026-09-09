@@ -288,38 +288,75 @@ def listar_contratos():
         ).fetchall()
         return [dict(linha) for linha in linhas]
 
-def obter_abreviacao_empresa(cnpj=None, nome_contratada=None):
+def _normalizar_numero_contrato(numero):
+    # "01/2024", " 1 / 2024 ", "1/24" -> "1/2024" (comparável); mantém sem espaços se o formato
+    # não for NN/AAAA. Usado pra casar o nº que vem do PDF com o numero_contrato do banco, que é
+    # texto livre e pode ter zero à esquerda / ano com 2 dígitos
+    if not numero:
+        return ""
+    m = re.search(r"(\d+)\s*/\s*(\d+)", str(numero))
+    if not m:
+        return re.sub(r"\s+", "", str(numero))
+    ano = m.group(2)
+    if len(ano) == 2:
+        ano = "20" + ano
+    return f"{int(m.group(1))}/{ano}"
+
+def _desambiguar_por_contrato(linhas, numero_contrato):
+    # linhas: sqlite3.Row com pelo menos "numero_contrato". Devolve a única linha correspondente,
+    # ou None quando não dá pra decidir (0 ou >1). Regra (pedido do usuário 2026-09-04): a mesma
+    # empresa pode ter vários contratos (mesmo CNPJ, "Planilha de controle" diferente por
+    # contrato) - sem o nº do contrato pra desempatar, é melhor não devolver nada do que devolver
+    # o contrato errado
+    if not linhas:
+        return None
+    alvo = _normalizar_numero_contrato(numero_contrato)
+    if alvo:
+        por_numero = [l for l in linhas if _normalizar_numero_contrato(l["numero_contrato"]) == alvo]
+        if len(por_numero) == 1:
+            return por_numero[0]
+        if len(por_numero) > 1:
+            linhas = por_numero  # nº repetido no banco - cai na regra de baixo (provavelmente None)
+    return linhas[0] if len(linhas) == 1 else None
+
+def obter_abreviacao_empresa(cnpj=None, nome_contratada=None, numero_contrato=None):
     # usado pelos scripts preencher_planilha_ro.py/preencher_planilha_ns.py: eles extraem o nome
     # completo da empresa (e o CNPJ, quando disponível) direto do PDF/SIAFI, e usam isso aqui pra
     # descobrir a abreviação já cadastrada em "Planilha de controle" (ex: "A M GAMBA ALIMENTOS" ->
     # "GAMBA") - CNPJ é a chave preferida (não depende de bater maiúscula/pontuação/etc.), nome é
-    # só reforço se o CNPJ não vier ou não bater com nada. None se não achar o contrato - quem
-    # chama decide o que fazer nesse caso (ex: manter o nome completo em vez de abreviar)
+    # só reforço se o CNPJ não vier ou não bater com nada. numero_contrato desempata quando a
+    # empresa tem mais de um contrato (ver _desambiguar_por_contrato). None se não achar OU se
+    # ficar ambíguo - quem chama decide (ex: manter o nome completo em vez de abreviar)
     digitos_cnpj = re.sub(r"\D", "", cnpj) if cnpj else ""
     with _conexao() as conexao:
-        if digitos_cnpj:
-            linha = conexao.execute(
-                "SELECT nome_planilha_controle FROM contratos WHERE cnpj = ?", (digitos_cnpj,)
-            ).fetchone()
-            if linha and linha["nome_planilha_controle"]:
-                return linha["nome_planilha_controle"]
-        if nome_contratada:
-            linha = conexao.execute(
-                "SELECT nome_planilha_controle FROM contratos WHERE nome_contratada = ? COLLATE NOCASE",
-                (nome_contratada.strip(),),
-            ).fetchone()
-            if linha and linha["nome_planilha_controle"]:
+        for coluna, valor in (("cnpj", digitos_cnpj),
+                              ("nome_contratada", nome_contratada.strip() if nome_contratada else "")):
+            if not valor:
+                continue
+            colacao = " COLLATE NOCASE" if coluna == "nome_contratada" else ""
+            linhas = conexao.execute(
+                f"SELECT nome_planilha_controle, numero_contrato FROM contratos WHERE {coluna} = ?{colacao}",
+                (valor,),
+            ).fetchall()
+            linhas = [l for l in linhas if l["nome_planilha_controle"]]
+            linha = _desambiguar_por_contrato(linhas, numero_contrato)
+            if linha:
                 return linha["nome_planilha_controle"]
     return None
 
-def obter_contrato_por_cnpj(cnpj):
+def obter_contrato_por_cnpj(cnpj, numero_contrato=None):
     # usado pelo script de conformidade: acha o contrato inteiro (com valores mensais, empenhos
-    # etc.) a partir do CNPJ extraído do PDF - aceita com ou sem máscara
+    # etc.) a partir do CNPJ extraído do PDF - aceita com ou sem máscara. numero_contrato desempata
+    # quando a empresa tem mais de um contrato; sem ele e com mais de um, devolve None (ambíguo -
+    # conferir contra o contrato errado é pior do que não conferir)
     digitos = re.sub(r"\D", "", cnpj) if cnpj else ""
     if not digitos:
         return None
     with _conexao() as conexao:
-        linha = conexao.execute("SELECT id FROM contratos WHERE cnpj = ?", (digitos,)).fetchone()
+        linhas = conexao.execute(
+            "SELECT id, numero_contrato FROM contratos WHERE cnpj = ?", (digitos,)
+        ).fetchall()
+    linha = _desambiguar_por_contrato(linhas, numero_contrato)
     return obter_contrato(linha["id"]) if linha else None
 
 def obter_contrato(contrato_id):

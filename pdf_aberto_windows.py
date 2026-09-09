@@ -5,13 +5,22 @@ import subprocess
 import time
 from pathlib import Path
 
+try:
+    import winreg # Windows-only (stdlib) - usado só pra resolver as pastas Desktop/Documents reais
+except ImportError:
+    winreg = None
+
 # encontra PDFs abertos em QUALQUER visualizador no Windows (Foxit, Adobe, Edge, SumatraPDF,
 # etc.) - existe como alternativa ao fluxo normal (abas do Chrome na tela djtools/
 # process_progress2) para quando o PDF já foi baixado e está aberto direto num visualizador,
 # sem passar pelo Chrome. Não depende de biblioteca nova (pywin32 etc.) - só invoca PowerShell,
 # que já vem em qualquer Windows, e pega a linha de comando do processo via WMI pra extrair o
 # caminho do arquivo (o título da janela geralmente só tem o nome do arquivo, não o caminho)
+# a 1ª linha força o PowerShell a escrever a saída em UTF-8 - sem isso, um caminho com acento
+# (ex: "...\OneDrive\Área de Trabalho\arquivo.pdf") volta noutro encoding, o Python decodifica
+# errado, "Área" vira "µrea" e o os.path.exists() lá embaixo falha, descartando o PDF em silêncio
 _PS_LISTAR_JANELAS_PDF = r"""
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Get-Process | Where-Object { $_.MainWindowTitle -match '\.pdf' } | ForEach-Object {
     $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").CommandLine
     [PSCustomObject]@{ Titulo = $_.MainWindowTitle; ComandoLinha = $cmd }
@@ -27,12 +36,14 @@ def listar_pdfs_abertos():
     try:
         resultado = subprocess.run(
             ["powershell", "-NoProfile", "-Command", _PS_LISTAR_JANELAS_PDF],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, timeout=15,
         )
     except (OSError, subprocess.SubprocessError):
         return []
 
-    saida = resultado.stdout.strip()
+    # decodifica na mão como UTF-8 (ver _PS_LISTAR_JANELAS_PDF) - text=True usaria o encoding da
+    # locale (cp1252) e corromperia caminho com acento
+    saida = resultado.stdout.decode("utf-8", errors="replace").strip()
     if not saida:
         return []
 
@@ -58,25 +69,67 @@ def listar_pdfs_abertos():
 DIAS_RECENTES_PADRAO = 7
 LIMITE_ARQUIVOS_PADRAO = 50
 
-def listar_pdfs_recentes(pasta=None, dias=DIAS_RECENTES_PADRAO, limite=LIMITE_ARQUIVOS_PADRAO):
-    # varre uma pasta (por padrão, Downloads) por PDFs modificados nos últimos `dias` dias -
-    # complementa listar_pdfs_abertos(), que só enxerga a aba em primeiro plano quando o
-    # visualizador usa abas dentro de uma única janela (ex: Foxit) - não tem como saber quais
-    # abas estão "abertas" nesse caso de fora do programa. Em vez disso, considera candidato
-    # qualquer PDF baixado recentemente; a validação de conteúdo (extrair_dados, no script que
-    # chama isso) descarta na hora qualquer um que não seja realmente um PDF de Andamento do
-    # processo, então um PDF errado na pasta não vira um problema, só é ignorado
-    pasta = Path(pasta) if pasta else (Path.home() / "Downloads")
-    if not pasta.is_dir():
-        return []
+# valores em HKCU\...\User Shell Folders - resolvem o caminho REAL de Downloads/Desktop/Documents
+# mesmo quando redirecionados pro OneDrive ou com nome localizado ("Área de Trabalho")
+_SHELL_FOLDERS = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+_CHAVES_PASTAS = ("{374DE290-123F-4565-9164-39C4925E467B}", "Desktop", "Personal") # Downloads, Desktop, Documents
 
+def _pastas_padrao():
+    # Downloads + Desktop + Documents, na ordem - varridas juntas porque o usuário costuma mover o
+    # PDF baixado pra Área de Trabalho antes de rodar a conferência
+    pastas = []
+    if winreg is not None:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _SHELL_FOLDERS) as chave:
+                for nome in _CHAVES_PASTAS:
+                    try:
+                        bruto, _ = winreg.QueryValueEx(chave, nome)
+                        pastas.append(Path(os.path.expandvars(bruto)))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    if not pastas: # fallback se o registro não colaborar
+        pastas = [Path.home() / "Downloads", Path.home() / "Desktop", Path.home() / "Documents"]
+    vistos, unicas = set(), []
+    for p in pastas:
+        if p not in vistos:
+            vistos.add(p)
+            unicas.append(p)
+    return unicas
+
+def listar_pdfs_recentes(pasta=None, dias=DIAS_RECENTES_PADRAO, limite=LIMITE_ARQUIVOS_PADRAO):
+    # varre pastas (por padrão Downloads + Desktop + Documents) por PDFs modificados nos últimos
+    # `dias` dias - complementa listar_pdfs_abertos(), que só enxerga a aba em primeiro plano
+    # quando o visualizador usa abas dentro de uma única janela (ex: Foxit) - não tem como saber
+    # quais abas estão "abertas" nesse caso de fora do programa. Em vez disso, considera candidato
+    # qualquer PDF recente; a validação de conteúdo (extrair_dados, no script que chama isso)
+    # descarta na hora qualquer um que não seja realmente um PDF de Andamento do processo, então
+    # um PDF errado numa dessas pastas não vira problema, só é ignorado
+    pastas = [Path(pasta)] if pasta else _pastas_padrao()
     limite_tempo = time.time() - dias * 86400
-    candidatos = [
-        arquivo for arquivo in pasta.glob("*.pdf")
-        if arquivo.is_file() and arquivo.stat().st_mtime >= limite_tempo
-    ]
+
+    candidatos = []
+    for p in pastas:
+        if not p.is_dir():
+            continue
+        for arquivo in p.glob("*.pdf"):
+            try:
+                if arquivo.is_file() and arquivo.stat().st_mtime >= limite_tempo:
+                    candidatos.append(arquivo)
+            except OSError:
+                pass
     candidatos.sort(key=lambda arquivo: arquivo.stat().st_mtime, reverse=True)
-    return [str(arquivo) for arquivo in candidatos[:limite]]
+
+    vistos, resultado = set(), []
+    for arquivo in candidatos:
+        chave = str(arquivo).lower()
+        if chave not in vistos:
+            vistos.add(chave)
+            resultado.append(str(arquivo))
+        if len(resultado) >= limite:
+            break
+    return resultado
 
 if __name__ == "__main__":
     for caminho in listar_pdfs_abertos():

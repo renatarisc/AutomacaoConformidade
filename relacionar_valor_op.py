@@ -38,14 +38,13 @@ def main(nome_planilha=None):
     credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
     gc = gspread.authorize(credenciais)
     planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
-    # aba = planilha.worksheet("RO")
-    aba = planilha.worksheet("TesteNS")
+    aba = planilha.worksheet("NS")
 
     dados = pd.DataFrame(aba.get_all_records(numericise_ignore=['all'])) # get_all_records() usa a 1ª linha como cabeçalho e exige que cada coluna tenha nome único
 
     # porque cada tipo de valor tem sua própria coluna de valor e sua própria coluna de OB de destino -
     # coluna_ob calculada pelo nome do cabeçalho, não fixa, pra não quebrar se a coluna mudar de lugar
-    # (ex: a inserção da coluna NF em TesteNS deslocou OB ISS/OB PG de 7/9 para 8/10)
+    # (ex: a inserção da coluna NF em NS deslocou OB ISS/OB PG de 7/9 para 8/10)
     COLUNAS_VALOR_OB = [
         {"nome_valor": "Valor ISS", "coluna_ob": dados.columns.get_loc("OB ISS") + 1, "nome_ob": "OB ISS"}, # Valor ISS -> OB ISS
         {"nome_valor": "Valor PG", "coluna_ob": dados.columns.get_loc("OB PG") + 1, "nome_ob": "OB PG"},   # Valor PG -> OB PG

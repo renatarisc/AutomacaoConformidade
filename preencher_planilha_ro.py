@@ -12,10 +12,24 @@ import escolher_planilha
 import pdf_aberto_windows
 
 RE_PROCESSO = re.compile(r"\d{5}\.\d{6}\.\d{4}-\d{2}")
-RE_DESPACHO_SEM_OCORRENCIA = re.compile(r"Despacho:\s*Sem\s+ocorr[êe]ncia", re.IGNORECASE)
+# campo "Tipo" da 1ª página - quebra em várias linhas no PDF de andamento, então \s+ em vez de espaço fixo
+RE_TIPO_SOLIC_EMPENHO = re.compile(r"Solicita[çc][ãa]o\s+de\s+empenho", re.IGNORECASE)
+# marco que fecha um ciclo de empenho: o "Despacho: Sem ocorrência" da conformidade OU o
+# "Certificado de Conformidade Sem Ocorrência" (alguns processos trazem o certificado no lugar
+# do despacho) - o recorte da etapa mais recente começa depois da ÚLTIMA ocorrência de qualquer um
+RE_MARCO_SEM_OCORRENCIA = re.compile(
+    r"(?:Despacho:\s*|Certificado\s+de\s+Conformidade\s+)Sem\s+ocorr[êe]ncia", re.IGNORECASE
+)
 RE_NUMERO_RO = re.compile(r"NUMERO\s*:\s*(2026RO\d+)")
 RE_DOCUMENTO_NC = re.compile(r"DOCUMENTO WEB\s*:\s*(2026NC\d+)")
 RE_DOCUMENTO_NE = re.compile(r"DOCUMENTO WEB\s*:\s*(2026NE\d+)")
+# nº do contrato, na OBSERVAÇÃO da tela da NC ("SOLICITAÇÃO DE EMPENHO DO CONTRATO N 17/2023 COM A
+# EMPRESA ..." ou, p/ contratação direta, "... DA CONTRATAÇÃO 90037/2025 COM A EMPRESA ..."). A
+# extração troca acento por caractere estranho, daí o "." curinga. Serve pra desambiguar a empresa
+# no banco quando ela tem mais de um contrato (nome curto muda por contrato)
+RE_SOLIC_CONTRATO = re.compile(
+    r"SOLICITA..O DE EMPENHO D[AO]\s+(?:CONTRATO|CONTRATA..O)\s+(?:N.?\s*)?(\d+/\d{4})", re.IGNORECASE
+)
 # CNPJ e nome capturados em grupos separados pra cruzar com o banco de contratos (ver
 # contratos_db.obter_abreviacao_empresa)
 RE_FAVORECIDO = re.compile(r"FAVORECIDO\s*:\s*([\d/\-]+)\s+(.+)")
@@ -73,15 +87,26 @@ def baixar_pdf_da_aba(navegador, url):
 def extrair_dados(arquivo_pdf):
     # arquivo_pdf: objeto tipo arquivo (ex: BytesIO com os bytes baixados da aba) - monta os dados da
     # solicitação de empenho mais recente: como o mesmo processo é usado o ano inteiro (vários empenhos ao
-    # longo do ano), a última página com despacho "Sem Ocorrência" é o que marca onde ela começa
-    leitor = PdfReader(arquivo_pdf)
-    if not leitor.pages:
+    # longo do ano), a última página com despacho/certificado "Sem Ocorrência" é o que marca onde ela começa
+    try:
+        leitor = PdfReader(arquivo_pdf)
+        if leitor.is_encrypted:
+            # PDFs de terceiros soltos na pasta Downloads (notas, DANFE, boletos) às vezes vêm
+            # com senha de dono e senha de usuário em branco - tenta abrir sem senha; se nem
+            # assim abrir (ou o PDF estiver corrompido), não é algo que conseguimos ler, então
+            # descarta o arquivo e segue para o próximo em vez de derrubar a rodada inteira
+            leitor.decrypt("")
+        if not leitor.pages:
+            return None
+        texto_pagina1 = leitor.pages[0].extract_text() or ""
+    except Exception as erro:
+        print(f"  (ignorado: não foi possível ler {getattr(arquivo_pdf, 'name', 'PDF')} - {erro})")
         return None
 
-    # checa só a 1ª página antes de extrair o PDF inteiro (pode ter dezenas/centenas de páginas) -
-    # descarta rápido um PDF que nem é do Suap, sem gastar tempo com o resto. Importante quando o
-    # PDF vem de uma varredura de pasta (ex: Downloads) em vez de uma aba já confirmada do Chrome
-    texto_pagina1 = leitor.pages[0].extract_text() or ""
+    # checa só a 1ª página (lida acima) antes de extrair o PDF inteiro (pode ter dezenas/centenas
+    # de páginas) - descarta rápido um PDF que nem é do Suap, sem gastar tempo com o resto.
+    # Importante quando o PDF vem de uma varredura de pasta (ex: Downloads) em vez de uma aba já
+    # confirmada do Chrome
     if "Processo Eletrônico" not in texto_pagina1:
         return None # não é um PDF de andamento de processo
 
@@ -89,7 +114,7 @@ def extrair_dados(arquivo_pdf):
     # (NS) - importante quando o PDF vem de uma varredura de pasta em vez de uma aba já confirmada:
     # a mesma pasta Downloads pode ter PDFs dos dois tipos misturados no mesmo dia (confirmado com
     # o usuário), e sem esse filtro cada script perderia tempo extraindo o PDF inteiro do outro tipo
-    if "Solicitação de empenho" not in texto_pagina1:
+    if not RE_TIPO_SOLIC_EMPENHO.search(texto_pagina1):
         return None # não é uma solicitação de empenho - provavelmente é do tipo NS (pagamento de nota fiscal)
 
     paginas = [texto_pagina1] + [pagina.extract_text() or "" for pagina in leitor.pages[1:]]
@@ -97,23 +122,32 @@ def extrair_dados(arquivo_pdf):
     match_processo = RE_PROCESSO.search(paginas[0]) # o número do processo vem sempre na 1ª página
     processo = match_processo.group() if match_processo else ""
 
-    pagina_despacho = None
+    pagina_marco = None
     for i, texto in enumerate(paginas):
-        if RE_DESPACHO_SEM_OCORRENCIA.search(texto):
-            pagina_despacho = i # guarda a ÚLTIMA ocorrência (sobrescreve a cada match, na ordem do PDF)
+        if RE_MARCO_SEM_OCORRENCIA.search(texto):
+            pagina_marco = i # guarda a ÚLTIMA ocorrência (sobrescreve a cada match, na ordem do PDF)
 
-    if pagina_despacho is None:
-        return None # não achou nenhum despacho "Sem Ocorrência" - não dá pra saber onde a solicitação mais recente começa
+    if pagina_marco is None:
+        return None # não achou nenhum despacho/certificado "Sem Ocorrência" - não dá pra saber onde a solicitação mais recente começa
 
-    pagina_inicial = pagina_despacho + 2 # +1 pra pular a página do próprio despacho, +1 porque a lista é 0-based e a planilha quer a página em 1-based
+    pagina_inicial = pagina_marco + 2 # +1 pra pular a página do próprio marco, +1 porque a lista é 0-based e a planilha quer a página em 1-based
 
     # dentro do mesmo ciclo pode ter mais de uma rodada de RO da NC/NC e de RO da NE/NE (ex: reforços sucessivos
-    # ainda não fechados por um novo despacho "Sem Ocorrência") - por isso coleta TODAS as ocorrências, na
+    # ainda não fechados por um novo despacho/certificado "Sem Ocorrência") - por isso coleta TODAS as ocorrências, na
     # ordem em que aparecem no PDF, em vez de parar na primeira
     pares_nc = [] # lista de (ro_nc, nc)
     pares_ne = [] # lista de (ro_ne, ne)
     valores_ro = {} # ro -> valor em texto BRL (ex: "1.208,33"), pego da tabela de eventos da tela do SIAFI daquela RO
     favorecido = ""
+
+    # nº do contrato do ciclo (tela da NC) - desambigua a empresa no banco quando ela tem mais de
+    # um contrato. Varre antes do laço porque a tela da NC pode vir depois da 1ª tela de NE
+    numero_contrato = ""
+    for texto in paginas[pagina_inicial - 1:]:
+        match_contrato = RE_SOLIC_CONTRATO.search(texto)
+        if match_contrato:
+            numero_contrato = match_contrato.group(1)
+            break
 
     for texto in paginas[pagina_inicial - 1:]:
         match_ro = RE_NUMERO_RO.search(texto)
@@ -135,9 +169,13 @@ def extrair_dados(arquivo_pdf):
                         cnpj_favorecido = match_favorecido.group(1)
                         nome_completo_favorecido = match_favorecido.group(2).strip()
                         # cruza com o banco de contratos pra achar a abreviação já cadastrada em
-                        # "Planilha de controle" (ex: "A M GAMBA ALIMENTOS" -> "GAMBA"); contrato
-                        # ainda não cadastrado -> mantém o nome completo em vez de abreviar
-                        abreviacao = contratos_db.obter_abreviacao_empresa(cnpj_favorecido, nome_completo_favorecido)
+                        # "Planilha de controle" (ex: "A M GAMBA ALIMENTOS" -> "GAMBA"); passa o nº
+                        # do contrato pra não pegar o nome curto de outro contrato da mesma empresa.
+                        # Contrato não cadastrado / empresa com vários contratos e sem nº -> mantém
+                        # o nome completo em vez de abreviar
+                        abreviacao = contratos_db.obter_abreviacao_empresa(
+                            cnpj_favorecido, nome_completo_favorecido, numero_contrato
+                        )
                         favorecido = abreviacao or nome_completo_favorecido
         else:
             # tela do SIAFI sem FAVORECIDO, com DOCUMENTO WEB de NC = uma rodada de RO da NC / NC
@@ -153,6 +191,25 @@ def extrair_dados(arquivo_pdf):
     grupos_nc = agrupar_por_referencia(pares_nc) # -> lista de (lista de ROs, nc), 1 item por NC distinta
     grupos_ne = agrupar_por_referencia(pares_ne) # -> lista de (lista de ROs, ne), 1 item por NE distinta
 
+    # um mesmo empenho (NE) pode ser reforçado em rodadas sucessivas, cada rodada com a sua NC (ex:
+    # 91.565,22 lastreado por NC 217 = 53.885,64 + NC 237 = 37.679,58). Sem isso o script geraria uma
+    # linha por NC - o que parece "duplicar" o processo - e ainda acusaria falso "valor da NC != valor
+    # empenhado", porque compararia uma NC só contra o total da NE. Junta as NCs numa linha só: ROs e
+    # NCs concatenadas na mesma célula e o SIAFI RO da NC somado
+    siafi_ro_nc_combinado = None
+    if len(grupos_ne) == 1 and len(grupos_nc) > 1:
+        valores_nc = []
+        for ros, _ in grupos_nc:
+            for ro in ros:
+                if ro in valores_ro:
+                    valores_nc.append(valor_brl_para_float(valores_ro[ro]))
+                    break
+        grupos_nc = [(
+            [ro for ros, _ in grupos_nc for ro in ros],
+            juntar_com_e([nc for _, nc in grupos_nc]),
+        )]
+        siafi_ro_nc_combinado = float_para_valor_brl(sum(valores_nc)) if valores_nc else ""
+
     # gera uma linha por NC/NE distinta, pareando pela ordem em que aparecem no PDF (1ª NC com a 1ª NE, etc.);
     # se um ciclo não tiver o mesmo número de NCs/NEs distintas dos dois lados, as colunas do lado que faltar ficam em branco
     total_linhas = max(len(grupos_nc), len(grupos_ne), 1)
@@ -162,11 +219,14 @@ def extrair_dados(arquivo_pdf):
         ros_nc, nc = grupos_nc[i] if i < len(grupos_nc) else ([], "")
         ros_ne, ne = grupos_ne[i] if i < len(grupos_ne) else ([], "")
 
-        siafi_ro_nc = "" # valor da NC: é o mesmo valor em qualquer uma das ROs do grupo (movimentações da mesma NC)
-        for ro in ros_nc:
-            if ro in valores_ro:
-                siafi_ro_nc = valores_ro[ro]
-                break
+        if siafi_ro_nc_combinado is not None: # NCs que se complementam num único empenho - soma já calculada acima
+            siafi_ro_nc = siafi_ro_nc_combinado
+        else:
+            siafi_ro_nc = "" # valor da NC: é o mesmo valor em qualquer uma das ROs do grupo (movimentações da mesma NC)
+            for ro in ros_nc:
+                if ro in valores_ro:
+                    siafi_ro_nc = valores_ro[ro]
+                    break
 
         # SIAFI NE: soma dos valores de cada RO agrupada nessa NE (o empenho vai sendo reforçado aos poucos)
         valores_ne = [valor_brl_para_float(valores_ro[ro]) for ro in ros_ne if ro in valores_ro]
@@ -215,7 +275,7 @@ def main(nome_planilha=None):
     credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES) # nome do arq dentro da pasta do Projeto
     gc = gspread.authorize(credenciais)
     planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
-    aba = planilha.worksheet("TesteRO")
+    aba = planilha.worksheet("RO")
 
     cabecalho = aba.row_values(1) # nomes das colunas, na ordem da planilha - usado pra montar a linha nova sem depender da posição fixa
     ultima_coluna = numero_coluna_para_letra(len(cabecalho))

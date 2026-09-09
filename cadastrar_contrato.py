@@ -94,6 +94,10 @@ HTML_CONTRATO = r"""
   table { width: 100%; border-collapse: collapse; background: var(--cloud); border: 1px solid var(--hairline); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow-1); }
   th, td { text-align: left; padding: 9px 12px; font-size: 12.5px; border-bottom: 1px solid var(--hairline); }
   th { color: var(--ink); font-weight: 700; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.02em; }
+  .th-ordenar { font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; background: none; border: 0; padding: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+  .th-ordenar:hover { color: var(--pine-deep); }
+  .th-ordenar .seta { color: var(--ink-faint); font-size: 10px; }
+  .th-ordenar[data-ativo="1"] .seta { color: var(--pine-deep); }
   tr:last-child td { border-bottom: none; }
   tbody tr { transition: background 100ms ease; }
   tbody tr:hover { background: var(--pine-tint); }
@@ -185,6 +189,7 @@ HTML_CONTRATO = r"""
   }
   .modal-visualizacao__cabecalho { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
   .modal-visualizacao__cabecalho h2 { margin: 0; font-size: 16px; color: var(--pine-deep); }
+  .modal-visualizacao__acoes { display: flex; gap: 8px; flex-shrink: 0; }
   .modal-visualizacao label { color: var(--pine-deep); }
   .valor-visualizacao { margin: 0; padding: 6px 0; font-size: 13px; color: var(--ink); }
   .rotulo-tributo { color: var(--pine-deep); font-weight: 600; }
@@ -439,9 +444,17 @@ HTML_CONTRATO = r"""
   // ---------- vista de lista ----------
 
   let contratosCarregados = [];
+  // ordenação da lista - campo é o mesmo valor exibido na coluna; dir 1 = crescente, -1 = decrescente
+  let ordenacao = { campo: null, dir: 1 };
 
   async function carregarLista() {
     contratosCarregados = await window.pywebview.api.listar();
+    aplicarFiltros();
+  }
+
+  function ordenarPor(campo) {
+    if (ordenacao.campo === campo) ordenacao.dir *= -1;
+    else ordenacao = { campo, dir: 1 };
     aplicarFiltros();
   }
 
@@ -456,6 +469,11 @@ HTML_CONTRATO = r"""
       const bateSituacao = !situacaoFiltro || contrato.situacao === situacaoFiltro;
       return bateNome && bateTipo && bateSituacao;
     });
+
+    if (ordenacao.campo) {
+      filtrados.sort((a, b) => ordenacao.dir * String(a[ordenacao.campo] || "").localeCompare(
+        String(b[ordenacao.campo] || ""), "pt-BR", { numeric: true, sensitivity: "base" }));
+    }
 
     renderizarTabela(filtrados);
   }
@@ -481,7 +499,6 @@ HTML_CONTRATO = r"""
         <td><a href="javascript:void(0)" class="link-visualizar" data-visualizar="${contrato.id}">${contrato.nome_planilha_controle || "-"}</a></td>
         <td>${contrato.numero_contrato || "-"}</td>
         <td>${contrato.tipo_contrato === "servico" ? "Serviço" : "Almoxarifado"}</td>
-        <td>${contrato.situacao === "encerrado" ? "Encerrado" : "Vigente"}</td>
         <td>${formatarData(contrato.vigencia_inicio)} - <span class="${deveDestacarVencido(contrato) ? "vigencia-vencida" : ""}">${formatarData(contrato.vigencia_fim)}</span></td>
         <td class="acoes">
           <button class="btn btn--acento btn--mini" data-editar="${contrato.id}">Editar</button>
@@ -490,13 +507,26 @@ HTML_CONTRATO = r"""
       </tr>
     `).join("");
 
+    const thOrdenavel = (campo, rotulo) => {
+      const ativo = ordenacao.campo === campo;
+      const seta = ativo ? (ordenacao.dir === 1 ? "▲" : "▼") : "↕";
+      return `<th><button type="button" class="th-ordenar" data-ordenar="${campo}" data-ativo="${ativo ? 1 : 0}">${rotulo}<span class="seta">${seta}</span></button></th>`;
+    };
+
     alvo.innerHTML = `
       <table>
-        <thead><tr><th>Contratada</th><th>Nº Contrato</th><th>Tipo</th><th>Situação</th><th>Vigência</th><th></th></tr></thead>
+        <thead><tr>
+          ${thOrdenavel("nome_planilha_controle", "Contratada")}
+          ${thOrdenavel("numero_contrato", "Nº Contrato")}
+          <th>Tipo</th><th>Vigência</th><th></th>
+        </tr></thead>
         <tbody>${linhas}</tbody>
       </table>
     `;
 
+    alvo.querySelectorAll("[data-ordenar]").forEach((botao) => {
+      botao.addEventListener("click", () => ordenarPor(botao.dataset.ordenar));
+    });
     alvo.querySelectorAll("[data-editar]").forEach((botao) => {
       botao.addEventListener("click", () => abrirFormEditar(Number(botao.dataset.editar)));
     });
@@ -559,7 +589,10 @@ HTML_CONTRATO = r"""
       <div class="modal-visualizacao">
         <div class="modal-visualizacao__cabecalho">
           <h2>${contrato.nome_contratada}</h2>
-          <button type="button" class="btn btn--outline btn--mini" data-fechar>Fechar</button>
+          <div class="modal-visualizacao__acoes">
+            <button type="button" class="btn btn--acento btn--mini" data-editar-contrato>Editar</button>
+            <button type="button" class="btn btn--outline btn--mini" data-fechar>Fechar</button>
+          </div>
         </div>
 
         <div class="painel">
@@ -621,6 +654,10 @@ HTML_CONTRATO = r"""
     const fechar = () => overlay.remove();
     overlay.addEventListener("click", (evento) => { if (evento.target === overlay) fechar(); });
     overlay.querySelector("[data-fechar]").addEventListener("click", fechar);
+    overlay.querySelector("[data-editar-contrato]").addEventListener("click", () => {
+      fechar();
+      abrirFormEditar(id);
+    });
 
     document.body.appendChild(overlay);
   }

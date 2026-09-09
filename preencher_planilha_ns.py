@@ -35,6 +35,13 @@ _MARCADORES_PAGINA_NF = (
                                             # camada de texto - ver conformidade.py/_extrair_texto_ocr)
     "DANFE",
 )
+# fallback tolerante pro título "NOTA FISCAL DE SERVIÇO(S) ELETRÔNICA" - cada prefeitura varia o
+# modelo do DANFSe: singular/plural ("SERVIÇO" x "SERVIÇOS"), sufixo "- NFS-e" e, sobretudo, os
+# acentos de "SERVIÇO"/"ELETRÔNICA" que o pypdf corrompe (\S? casa o caractere trocado, o "C" de
+# "SERVICO" sem acento, ou o acento intacto). Visto no 1250.pdf (modelo de Campos dos Goytacazes).
+# Exige o título em início de linha pra NÃO casar a linha "Tipo do Documento: Nota Fiscal de
+# Serviço Eletrônica (NFS-e)" da capa de digitalização do Suap (que não é a nota em si)
+RE_MARCADOR_NF = re.compile(r"(?:^|\n)NOTA FISCAL DE SERVI\S?OS? ELETR\S?NICA", re.IGNORECASE)
 
 def localizar_texto_nf(paginas):
     # devolve (texto das páginas que SÃO a nota fiscal, concatenado; números dessas páginas,
@@ -42,7 +49,10 @@ def localizar_texto_nf(paginas):
     # anexada como imagem, sem texto nenhum pra extrair). Mais de uma página encontrada pode ser a
     # mesma nota espalhada por 2 páginas OU duas notas fiscais distintas anexadas ao processo (ex:
     # uma nota e sua substituta por carta de correção) - main() avisa nesse caso pra conferência manual
-    indices = [i for i, texto in enumerate(paginas) if any(marcador in texto for marcador in _MARCADORES_PAGINA_NF)]
+    indices = [
+        i for i, texto in enumerate(paginas)
+        if any(marcador in texto for marcador in _MARCADORES_PAGINA_NF) or RE_MARCADOR_NF.search(texto)
+    ]
     texto = "\n".join(paginas[i] for i in indices)
     paginas_encontradas = [i + 1 for i in indices]
     return texto, paginas_encontradas
@@ -52,6 +62,27 @@ def localizar_texto_nf(paginas):
 # geralmente é "Número da NFS-e" ou "Número da Nota" (varia conforme o modelo/prefeitura), não
 # "Nota Fiscal" - esse é o texto que aparece no Assunto da capa do processo (outra fonte, não a nota)
 RE_NUMERO_NF = re.compile(r"N[uú]mero\s+da\s+(?:NFS-e|Nota(?:\s+Fiscal)?)\D*?(\d+)", re.IGNORECASE)
+# modelo Campos dos Goytacazes (GISS): não tem rótulo "Número da NFS-e" - o número aparece solto
+# entre os rótulos "NFS-e Substituída" e "NFS-e" da tabelinha de cabeçalho (layout em colunas que
+# o pypdf achata; \S? cobre o "í" corrompido de "Substituída")
+RE_NUMERO_NF_CAMPOS = re.compile(r"NFS-e Substitu\S?da\s*\n\s*(\d+)\s*\n\s*NFS-e\b", re.IGNORECASE)
+
+def extrair_numero_nf(texto_nf):
+    # texto_nf já restrito à(s) página(s) da nota (ver localizar_texto_nf) - tenta o rótulo padrão
+    # e, se não achar, o layout do modelo de Campos dos Goytacazes
+    m = RE_NUMERO_NF.search(texto_nf) or RE_NUMERO_NF_CAMPOS.search(texto_nf)
+    return m.group(1) if m else ""
+# NF de MATERIAL (almoxarifado) = DANFE / NF-e, layout diferente da NFS-e de serviço: o nº vem
+# como "Nº. 000.018.186" (com zeros à esquerda) e a emissão como "DATA DA EMISSÃO\n13/07/2026"
+RE_NUMERO_DANFE = re.compile(r"N[ºo°]\.\s*(\d[\d.]+\d)")
+RE_DATA_EMISSAO_DANFE = re.compile(r"DATA DA EMISS[ÃA]O\s*\n?\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
+# campo "Tipo" da 1ª página: um processo de PAGAMENTO de nota fiscal é de serviço ("Pagamento de
+# prestador de...") ou de material/almoxarifado ("Pagamento de nota fiscal de material") - o
+# segundo grupo (RE_TIPO_NF_MATERIAL) só serve pra escolher como ler a nota (DANFE, não NFS-e)
+# \s+ em todos os espaços internos: no PDF de andamento o campo "Tipo" quebra em várias linhas
+# ("Pagamento de prestador\nde serviço à pessoa\njurídica – contratos"), então espaço fixo não casa
+RE_TIPO_PAGAMENTO_NF = re.compile(r"Pagamento\s+de\s+(?:prestador\s+de|nota\s+fiscal)", re.IGNORECASE)
+RE_TIPO_NF_MATERIAL = re.compile(r"Pagamento\s+de\s+nota\s+fiscal\s+de\s+material", re.IGNORECASE)
 RE_DESPACHO_SEM_OCORRENCIA = re.compile(r"Despacho:\s*Sem\s+ocorr[êe]ncia", re.IGNORECASE)
 RE_NUMERO_NS = re.compile(r"NUMERO\s*:\s*(2026NS\d+)")
 RE_TITULO_NP = re.compile(r"TITULO DE CREDITO\s*:\s*(2026NP\d+)")
@@ -66,23 +97,48 @@ RE_NUMERO_DF = re.compile(r"NUMERO\s*:\s*(2026DF8\d+)")
 # coluna da planilha tendo sido renomeada para "Empresa") - CNPJ e nome capturados em grupos
 # separados pra cruzar com o banco de contratos (ver obter_abreviacao_empresa)
 RE_EMPRESA = re.compile(r"FAVORECIDO\s*:\s*([\d/\-]+)\s*-?\s*(.+)")
+# nº do contrato - Instrumento de Cobrança ("Contrato: 68/2024") ou texto livre da NF ("contrato
+# nº 68/2024"). Best-effort (nem todo processo cita): serve pra desambiguar a empresa no banco
+# quando ela tem mais de um contrato (o nome curto da "Planilha de controle" muda por contrato)
+RE_CONTRATO = re.compile(r"[Cc]ontrato\s*:?\s*n?[ºo°]?\s*(\d{1,4}/\d{4})", re.IGNORECASE)
 # data de emissão da NOTA FISCAL em si (não da DPS, do DARF ou de qualquer outro documento do
 # processo que também tenha um campo "Data de Emissão" - ex: o Certificado de Conformidade) -
 # como o modelo da nota fiscal varia (a confirmar com o usuário caso apareça um formato muito
 # diferente do testado), o rótulo aceito é flexível ("Data de Emissão" ou "Data e Hora da
 # Emissão", com ou sem "da <documento>" na frente) - só o valor em si (dd/mm/aaaa) é capturado
 RE_DATA_EMISSAO = re.compile(
-    r"Data\s+(?:e\s+Hora\s+)?d[ae]\s+emiss\D?o(?:\s+d[ae]\s+(\S+))?\D*?(\d{2}/\d{2}/\d{4})",
+    r"(?:Data\s+(?:e\s+Hora\s+)?d[ae]\s+emiss\D?o(?:\s+d[ae]\s+(\S+))?"
+    r"|Emiss\S?o\s+da\s+NFS-e)"  # rótulo do modelo de Campos dos Goytacazes ("Emissão da NFS-e")
+    r"\D*?(\d{2}/\d{2}/\d{4})",
     re.IGNORECASE,
 )
 # mês em que o SERVIÇO foi prestado (não quando a nota foi emitida - "Competência da NFS-e" é
 # outra coisa, é a data de emissão disfarçada) - só aparece no texto livre da "Descrição do
 # Serviço" da nota, e nem toda nota escreve isso (o usuário confirmou: se não achar, fica em
-# branco mesmo, ele preenche à mão)
+# branco mesmo, ele preenche à mão). Duas formas já vistas: rótulo "Competência Julho/2026" e a
+# frase corrida "...no mês de JULHO/2026..." (NFS-e nacional). O separador tanto pode ser "/"
+# quanto " de " ("julho de 2026")
 RE_COMPETENCIA = re.compile(
-    r"Compet\D?ncia\s+(Janeiro|Fevereiro|Mar\D?o|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)\s*/\s*(\d{2,4})",
+    r"(?:Compet\D?ncia|m\D?s\s+de)\s+"
+    r"(Janeiro|Fevereiro|Mar\D?o|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)"
+    r"\s*(?:/|\s+de\s+)\s*(\d{2,4})",
     re.IGNORECASE,
 )
+_MESES_PT = ("", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+             "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro")
+# alguns modelos de NFS-e não trazem o mês da competência escrito, só um "Período de referência:
+# DD/MM/AAAA a DD/MM/AAAA" no texto do serviço (ex: link de telecom, modelo de Campos dos
+# Goytacazes) - nesses, a competência é tomada como o MÊS INICIAL desse período
+RE_PERIODO_REFERENCIA_NF = re.compile(
+    r"Per\D?odo\s+de\s+refer\Dncia:\s*(\d{2})/(\d{2})/(\d{4})\s*a\s*(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
+
+def extrair_periodo_referencia_nf(texto_nf):
+    # devolve o intervalo bruto ("06/07/2026 a 05/08/2026") pra exibir junto da competência
+    # inferida, ou "" se a nota não traz esse campo
+    m = RE_PERIODO_REFERENCIA_NF.search(texto_nf)
+    return f"{m.group(1)}/{m.group(2)}/{m.group(3)} a {m.group(4)}" if m else ""
 # número(s) do(s) empenho(s) vinculado(s) à nota fiscal, tirado da página do "Instrumento de
 # Cobrança" (contratos.gov.br) - fica na tabela "Empenhos:" (colunas Número/Subelemento/Valor),
 # entre esse rótulo e o próximo campo da página ("Repactuação:") - pode ter mais de uma linha
@@ -141,7 +197,13 @@ def extrair_competencia_nf(texto_nf):
     # quando a nota escreve isso explicitamente (nem toda escreve); se não achar, devolve vazio de
     # propósito (o usuário completa à mão nesse caso)
     match = RE_COMPETENCIA.search(texto_nf)
-    return f"{match.group(1)}/{match.group(2)}" if match else ""
+    if match:
+        return f"{match.group(1)}/{match.group(2)}"
+    # sem mês escrito: usa o mês inicial do "Período de referência", quando a nota traz esse campo
+    m_periodo = RE_PERIODO_REFERENCIA_NF.search(texto_nf)
+    if m_periodo and 1 <= int(m_periodo.group(2)) <= 12:
+        return f"{_MESES_PT[int(m_periodo.group(2))]}/{m_periodo.group(3)}"
+    return ""
 
 def extrair_empenhos(paginas):
     # números de empenho (NE) distintos, tirados da tabela "Empenhos:" da página do Instrumento
@@ -175,23 +237,36 @@ def extrair_dados(arquivo_pdf):
     # Por isso NS/NP/empresa são varridos no PDF inteiro (a mesma NS/NP pode aparecer repetida em
     # mais de um bloco da tela, daí a deduplicação), enquanto a página inicial só é calculada quando
     # existe pelo menos um despacho "Sem Ocorrência" no PDF - main() decide o que fazer com cada caso
-    leitor = PdfReader(arquivo_pdf)
-    if not leitor.pages:
+    try:
+        leitor = PdfReader(arquivo_pdf)
+        if leitor.is_encrypted:
+            # PDFs de terceiros soltos na pasta Downloads (notas, DANFE, boletos) às vezes vêm
+            # com senha de dono e senha de usuário em branco - tenta abrir sem senha; se nem
+            # assim abrir (ou o PDF estiver corrompido), não é algo que conseguimos ler, então
+            # descarta o arquivo e segue para o próximo em vez de derrubar a rodada inteira
+            leitor.decrypt("")
+        if not leitor.pages:
+            return None
+        texto_pagina1 = leitor.pages[0].extract_text() or ""
+    except Exception as erro:
+        print(f"  (ignorado: não foi possível ler {getattr(arquivo_pdf, 'name', 'PDF')} - {erro})")
         return None
 
-    # checa só a 1ª página antes de extrair o PDF inteiro (pode ter dezenas/centenas de páginas) -
-    # descarta rápido um PDF que nem é do Suap, sem gastar tempo com o resto. Importante quando o
-    # PDF vem de uma varredura de pasta (ex: Downloads) em vez de uma aba já confirmada do Chrome
-    texto_pagina1 = leitor.pages[0].extract_text() or ""
+    # checa só a 1ª página (lida acima) antes de extrair o PDF inteiro (pode ter dezenas/centenas
+    # de páginas) - descarta rápido um PDF que nem é do Suap, sem gastar tempo com o resto.
+    # Importante quando o PDF vem de uma varredura de pasta (ex: Downloads) em vez de uma aba já
+    # confirmada do Chrome
     if "Processo Eletrônico" not in texto_pagina1:
         return None # não é um PDF de andamento de processo
 
-    # o campo "Tipo" da 1ª página diferencia processo de pagamento (NS) de solicitação de empenho
-    # (RO) - importante quando o PDF vem de uma varredura de pasta em vez de uma aba já confirmada:
-    # a mesma pasta Downloads pode ter PDFs dos dois tipos misturados no mesmo dia (confirmado com
-    # o usuário), e sem esse filtro cada script perderia tempo extraindo o PDF inteiro do outro tipo
-    if "Pagamento de prestador de" not in texto_pagina1:
+    # o campo "Tipo" da 1ª página diferencia processo de pagamento (NS - serviço OU material) de
+    # solicitação de empenho (RO) - importante quando o PDF vem de uma varredura de pasta em vez de
+    # uma aba já confirmada: a mesma pasta Downloads pode ter PDFs dos dois tipos misturados no
+    # mesmo dia (confirmado com o usuário), e sem esse filtro cada script perderia tempo extraindo
+    # o PDF inteiro do outro tipo
+    if not RE_TIPO_PAGAMENTO_NF.search(texto_pagina1):
         return None # não é um processo de pagamento de nota fiscal - provavelmente é do tipo RO
+    eh_material = bool(RE_TIPO_NF_MATERIAL.search(texto_pagina1)) # muda só como a nota é lida (DANFE)
 
     match_processo = RE_PROCESSO.search(texto_pagina1) # o número do processo vem sempre na 1ª página
     if not match_processo:
@@ -204,14 +279,32 @@ def extrair_dados(arquivo_pdf):
     # encontrada (ou tiver sido anexada como imagem/scan, sem texto pra ler), as três ficam em
     # branco juntas, nunca uma vindo de um documento e outra de outro
     texto_nf, paginas_nf = localizar_texto_nf(paginas)
-    if texto_nf:
-        match_nf = RE_NUMERO_NF.search(texto_nf)
-        nf = match_nf.group(1) if match_nf else ""
+    if not texto_nf:
+        nf, emissao, competencia = "", "", ""
+    elif eh_material:
+        # DANFE (NF-e de material): nº com zeros à esquerda ("000.018.186" -> "18186"); competência
+        # é o mês do SERVIÇO prestado - não existe em compra de material, fica em branco
+        match_nf = RE_NUMERO_DANFE.search(texto_nf)
+        nf = str(int(re.sub(r"\D", "", match_nf.group(1)))) if match_nf else ""
+        match_emissao = RE_DATA_EMISSAO_DANFE.search(texto_nf)
+        emissao = match_emissao.group(1) if match_emissao else ""
+        competencia = ""
+    else:
+        nf = extrair_numero_nf(texto_nf)
         emissao = extrair_data_emissao_nf(texto_nf)
         competencia = extrair_competencia_nf(texto_nf)
-    else:
-        nf, emissao, competencia = "", "", ""
     empenhos_encontrados = extrair_empenhos(paginas) # número(s) do(s) empenho(s), tirado(s) do Instrumento de Cobrança
+    if not empenhos_encontrados:
+        # material às vezes não tem Instrumento de Cobrança - a NE vem no Assunto da 1ª página
+        # ("... Nota de Empenho: 2026NE500836 ...")
+        empenhos_encontrados = list(dict.fromkeys(RE_NUMERO_NE.findall(texto_pagina1)))
+
+    numero_contrato = "" # desambigua a empresa no banco quando ela tem mais de um contrato
+    for texto in paginas:
+        match_contrato = RE_CONTRATO.search(texto)
+        if match_contrato:
+            numero_contrato = match_contrato.group(1)
+            break
 
     ns_encontrados = [] # números de NS distintos, na ordem em que apareceram no PDF
     np_encontrados = [] # números de NP distintos, na ordem em que apareceram no PDF
@@ -244,9 +337,12 @@ def extrair_dados(arquivo_pdf):
                 cnpj_empresa = match_empresa.group(1)
                 nome_completo_empresa = match_empresa.group(2).strip()
                 # cruza com o banco de contratos pra achar a abreviação já cadastrada em "Planilha
-                # de controle" (ex: "A M GAMBA ALIMENTOS" -> "GAMBA"); contrato ainda não
-                # cadastrado -> mantém o nome completo em vez de abreviar
-                abreviacao = contratos_db.obter_abreviacao_empresa(cnpj_empresa, nome_completo_empresa)
+                # de controle" (ex: "A M GAMBA ALIMENTOS" -> "GAMBA"); passa o nº do contrato pra
+                # não pegar o nome curto de outro contrato da mesma empresa. Contrato não cadastrado
+                # / empresa com vários contratos e sem nº -> mantém o nome completo em vez de abreviar
+                abreviacao = contratos_db.obter_abreviacao_empresa(
+                    cnpj_empresa, nome_completo_empresa, numero_contrato
+                )
                 empresa = abreviacao or nome_completo_empresa
 
     pagina_inicial = (pagina_despacho + 2) if pagina_despacho is not None else None # +1 pra pular a página do próprio despacho, +1 porque a lista é 0-based
@@ -353,7 +449,7 @@ def main(nome_planilha=None):
     credenciais = Credentials.from_service_account_file("credenciais.json", scopes=SCOPES)
     gc = gspread.authorize(credenciais)
     planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
-    aba = planilha.worksheet("TesteNS")
+    aba = planilha.worksheet("NS")
 
     cabecalho = aba.row_values(1)
     ultima_coluna = numero_coluna_para_letra(len(cabecalho))
