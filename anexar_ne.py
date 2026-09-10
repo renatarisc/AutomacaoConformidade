@@ -7,6 +7,8 @@ from selenium.webdriver.support.ui import Select
 import time # para fazer pausa
 import glob
 
+import credenciais_suap
+
 def executar(navegador, var_NE):
 
     botao_upload_externo = WebDriverWait(navegador, 20).until(EC.presence_of_element_located((By.XPATH, "//a[contains(., 'Upload de documento externo')]")))
@@ -27,7 +29,14 @@ def executar(navegador, var_NE):
 
     # o carregamento do campo "Tipo" é feito com AJAX, por isso uma solução diferente
     campo_tipo_select = WebDriverWait(navegador, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "span[id^='select2-tipo_']")))
-    campo_tipo_select.click()
+    navegador.execute_script("arguments[0].scrollIntoView({block: 'center'});", campo_tipo_select)
+    time.sleep(0.3)
+    try:
+        campo_tipo_select.click()
+    except Exception:
+        # Chrome 152+ é mais rígido com "element click intercepted" (o <b> da setinha do select2
+        # recebe o clique) - força via JS, que dispara o mesmo handler de abertura do select2
+        navegador.execute_script("arguments[0].click();", campo_tipo_select)
     time.sleep(0.5) # pequena pausa para garantir que a animação de abertura do menu terminou
     texto = "Nota de Empenho (NE)"
     actions = ActionChains(navegador) # envia o texto DIRETAMENTE para a parte focada usando ActionChains
@@ -52,7 +61,7 @@ def executar(navegador, var_NE):
     # select_perfil = Select(navegador.find_element(By.ID, "id_papel"))
     select_perfil = Select(WebDriverWait(navegador, 20).until(EC.element_to_be_clickable((By.ID, "id_papel"))))
     select_perfil.select_by_value("5260") # = ASSISTENTE EM ADMINISTRACAO
-    navegador.find_element(By.ID, "id_senha").send_keys("Aj250104!")
+    navegador.find_element(By.ID, "id_senha").send_keys(credenciais_suap.senha())
     navegador.find_element(By.XPATH, "//input[@value='Assinar Documento']").click() # botão Assinar Documento
 
     time.sleep(5) # porque a assinatura do documento sempre demora um pouco

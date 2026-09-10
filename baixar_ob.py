@@ -15,6 +15,16 @@ PASTA_DOWNLOADS = Path.home() / "Downloads" # pasta onde o Sistema salva o PDF d
 AMARELO_CLARO_1 = (1, 217 / 255, 102 / 255) # mesmo amarelo usado no relacionar_valor_op.py e no relacionar_op_ob.py
 VERMELHO = (1, 0, 0)
 
+def coluna(dados, nome):
+    # o texto do cabeçalho da aba NS já mudou de caixa mais de uma vez neste projeto
+    # (ex: "Processo" virou "PROCESSO"), então resolve o nome da coluna sem depender de
+    # maiúsculas/minúsculas nem de espaços nas pontas - mesmo critério do preencher_planilha_ns.py
+    alvo = nome.strip().casefold()
+    for atual in dados.columns:
+        if str(atual).strip().casefold() == alvo:
+            return atual
+    raise KeyError(f"coluna {nome!r} não encontrada no cabeçalho da aba NS: {list(dados.columns)}")
+
 def cor_bate(cor_celula, cor_alvo, tolerancia=0.01):
     # a API do Sheets guarda a cor com menos precisão do que o float do Python,
     # então uma comparação exata (==) quase nunca bate mesmo com a cor visualmente igual
@@ -40,11 +50,22 @@ def variante_barra_processo(processo):
     base, ano = processo.rsplit(".", 1)
     return f"{base}/{ano}"
 
+def eh_diaria(conteudo):
+    # OB de diária/passagem é gerada pelo SCDP e sai da CONOB com o campo PROCESSO em branco
+    # ("DOC GERADO PELO SCDP" / "PCDP nnnnnn/nn" na OBSERVACAO)
+    return "SCDP" in conteudo
+
 def pdf_contem(caminho_pdf, ob, valor, processo):
     leitor = PdfReader(str(caminho_pdf))
     conteudo = "\n".join(pagina.extract_text() or "" for pagina in leitor.pages)
-    processo_ok = processo in conteudo or variante_barra_processo(processo) in conteudo
-    return ob in conteudo and valor in conteudo and processo_ok
+    if ob not in conteudo or valor not in conteudo:
+        return False
+    # exceção p/ OB de diária: a CONOB dela não traz processo nenhum (e na planilha o processo
+    # costuma estar numa célula mesclada, que só devolve valor na 1ª linha do merge), então o
+    # par OB + valor já basta. Para as demais, o número do processo continua sendo exigido.
+    if eh_diaria(conteudo):
+        return True
+    return processo in conteudo or variante_barra_processo(processo) in conteudo
 
 def main(nome_planilha=None):
     # nome_planilha: passado pelo gui.py com a planilha escolhida na interface; rodando o
@@ -69,14 +90,15 @@ def main(nome_planilha=None):
     planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
     aba = planilha.worksheet("NS")
 
-    dados = ler_planilha.carregar_registros(aba) # 1ª linha vira cabeçalho, resto como texto; ignora colunas sem nome no cabeçalho
+    dados = ler_planilha.carregar_registros(aba, preencher_mescladas=True) # 1ª linha vira cabeçalho, resto como texto; ignora colunas sem nome; replica célula mesclada (ex: "Processo" de diárias) para todo o bloco
     cores = carregar_cores_planilha.executar(aba) # chama a def
 
     # a cor amarelo claro 1 sinaliza que a OB (ISS ou PG) já foi relacionada pelo relacionar_op_ob.py e ainda precisa
     # ser baixada - coluna calculada pelo nome do cabeçalho, não fixa, pra não quebrar se a coluna mudar de lugar
+    col_processo = coluna(dados, "Processo")
     COLUNAS_OB = [
-        {"coluna": dados.columns.get_loc("OB ISS") + 1, "nome": "OB ISS", "nome_valor": "Valor ISS"},
-        {"coluna": dados.columns.get_loc("OB PG") + 1, "nome": "OB PG", "nome_valor": "Valor PG"},
+        {"coluna": dados.columns.get_loc(coluna(dados, "OB ISS")) + 1, "nome": coluna(dados, "OB ISS"), "nome_valor": coluna(dados, "Valor ISS")},
+        {"coluna": dados.columns.get_loc(coluna(dados, "OB PG")) + 1, "nome": coluna(dados, "OB PG"), "nome_valor": coluna(dados, "Valor PG")},
     ]
 
     lista_processo = []
@@ -96,7 +118,7 @@ def main(nome_planilha=None):
                 "coluna": info["coluna"],
                 "OB": valor_celula,
                 "valor": str(dados.loc[linha, info["nome_valor"]]).strip(),
-                "processo": str(dados.loc[linha, "Processo"]).strip(),
+                "processo": str(dados.loc[linha, col_processo]).strip(),
             })
 
     lista_sucesso = [] # processos cujo pyautogui não deu erro, na ordem em que rodaram

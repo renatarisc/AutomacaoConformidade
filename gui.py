@@ -4,6 +4,7 @@ import json
 import threading
 import traceback
 
+import requests # já vem com o gspread/google-auth - usado só para reconhecer quedas de conexão com a API do Google
 import webview # pip install pywebview - abre uma janela nativa renderizando HTML/CSS/JS (WebView2 no Windows)
 
 import escolher_planilha
@@ -110,7 +111,7 @@ OPCOES = [
         "coluna": 1,
         "icone": ICONE_BAIXAR,
         "titulo": "Baixar OB",
-        "descricao": "Baixa do Siafi Operacional (Cara Preta) o PDF da OB pintada de Amarelo.",
+        "descricao": "Baixa do Siafi Operacional (Cara Preta) o PDF da OB pintada de Amarelo. Renomeia após conferir nº do processo, nº da OB e valor.",
         "requisito": "Requer o Sistema já aberto e com o foco antes de começar a rodar a automação (pyautogui).",
     },
     {
@@ -204,6 +205,11 @@ class Api:
         except SystemExit as e:
             # algum script chama sys.exit() no próprio fluxo de erro (ex: baixar_anexar_ne.py)
             codigo_retorno = e.code if isinstance(e.code, int) else 1
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            # queda de conexão com a API do Google (Sheets/Drive) - quase sempre transitória,
+            # não é bug do script; mostra recado curto em vez do traceback e pede pra rodar de novo
+            print("\n[!] Falha de conexão com o Google (Sheets/Drive). Verifique a internet e execute de novo.")
+            codigo_retorno = 2
         except Exception:
             traceback.print_exc() # cai no escritor (stderr redirecionado), aparece no console da página
             codigo_retorno = 1
@@ -213,6 +219,8 @@ class Api:
         self.executando = False
         if codigo_retorno == 0:
             self.window.evaluate_js(f"definirEstado('sucesso', {json.dumps('Concluído.')})")
+        elif codigo_retorno == 2:
+            self.window.evaluate_js(f"definirEstado('erro', {json.dumps('Sem conexão com o Google. Verifique a internet e execute de novo.')})")
         else:
             self.window.evaluate_js(f"definirEstado('erro', {json.dumps(f'Terminou com erro (código {codigo_retorno}).')})")
         self.window.evaluate_js("definirExecutando(false)")

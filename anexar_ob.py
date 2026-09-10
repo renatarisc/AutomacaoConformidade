@@ -11,6 +11,7 @@ import gspread # para manipular as planilhas do Drive
 import time # para fazer pausa
 
 import carregar_cores_planilha
+import credenciais_suap
 import escolher_planilha
 import ler_planilha
 import pintar_celula_planilha
@@ -19,6 +20,16 @@ import encaminhar_processo
 AMARELO_CLARO_1 = (1, 217 / 255, 102 / 255) # mesmo amarelo usado nos demais scripts do fluxo
 VERMELHO = (1, 0, 0)
 BRANCO = (1, 1, 1) # sinaliza que a OB já foi anexada e o processo tramitado - não precisa de mais nenhuma ação
+
+def coluna(dados, nome):
+    # o texto do cabeçalho da aba NS já mudou de caixa mais de uma vez neste projeto
+    # (ex: "Processo" virou "PROCESSO"), então resolve o nome da coluna sem depender de
+    # maiúsculas/minúsculas nem de espaços nas pontas - mesmo critério do preencher_planilha_ns.py
+    alvo = nome.strip().casefold()
+    for atual in dados.columns:
+        if str(atual).strip().casefold() == alvo:
+            return atual
+    raise KeyError(f"coluna {nome!r} não encontrada no cabeçalho da aba NS: {list(dados.columns)}")
 
 def cor_bate(cor_celula, cor_alvo, tolerancia=0.01):
     # a API do Sheets guarda a cor com menos precisão do que o float do Python,
@@ -43,7 +54,14 @@ def executar(navegador, var_OB):
 
     # o carregamento do campo "Tipo" é feito com AJAX, por isso uma solução diferente
     campo_tipo_select = WebDriverWait(navegador, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "span[id^='select2-tipo_']")))
-    campo_tipo_select.click()
+    navegador.execute_script("arguments[0].scrollIntoView({block: 'center'});", campo_tipo_select)
+    time.sleep(0.3)
+    try:
+        campo_tipo_select.click()
+    except Exception:
+        # Chrome 152+ é mais rígido com "element click intercepted" (o <b> da setinha do select2
+        # recebe o clique) - força via JS, que dispara o mesmo handler de abertura do select2
+        navegador.execute_script("arguments[0].click();", campo_tipo_select)
     time.sleep(0.5)  # pequena pausa para garantir que a animação de abertura do menu terminou
     texto = "Ordem Bancária (OB)"
     actions = ActionChains(navegador)  # envia o texto DIRETAMENTE para a parte focada usando ActionChains
@@ -77,7 +95,7 @@ def executar(navegador, var_OB):
     # ------- Assina o documento anexado -------
     select_perfil = Select(navegador.find_element(By.ID, "id_papel"))
     select_perfil.select_by_value("5260")  # = ASSISTENTE EM ADMINISTRACAO
-    navegador.find_element(By.ID, "id_senha").send_keys("Aj250104!")
+    navegador.find_element(By.ID, "id_senha").send_keys(credenciais_suap.senha())
     navegador.find_element(By.XPATH, "//input[@value='Assinar Documento']").click()  # botão Assinar Documento
 
     time.sleep(3)
@@ -95,37 +113,48 @@ def main(nome_planilha=None):
     planilha = gc.open(nome_planilha or escolher_planilha.NOME_PLANILHA_PADRAO)
     aba = planilha.worksheet("NS")
 
-    dados = ler_planilha.carregar_registros(aba) # 1ª linha vira cabeçalho, resto como texto; ignora colunas sem nome no cabeçalho
+    dados = ler_planilha.carregar_registros(aba, preencher_mescladas=True) # 1ª linha vira cabeçalho, resto como texto; ignora colunas sem nome; replica célula mesclada (ex: "Processo" de diárias) para todo o bloco
     cores = carregar_cores_planilha.executar(aba) # chama a def
 
     # a cor amarelo claro 1 sinaliza que a OB (ISS ou PG) já foi baixada pelo baixar_ob.py e ainda precisa ser
     # anexada ao processo - coluna calculada pelo nome do cabeçalho, não fixa, pra não quebrar se a coluna mudar de lugar
+    col_processo = coluna(dados, "Processo")
+    col_despacho = coluna(dados, "DESPACHO PROC") # coluna renomeada de "DESPACHO" na planilha
     COLUNAS_OB = [
-        {"coluna": dados.columns.get_loc("OB ISS") + 1, "nome": "OB ISS"},
-        {"coluna": dados.columns.get_loc("OB PG") + 1, "nome": "OB PG"},
+        {"coluna": dados.columns.get_loc(coluna(dados, "OB ISS")) + 1, "nome": coluna(dados, "OB ISS")},
+        {"coluna": dados.columns.get_loc(coluna(dados, "OB PG")) + 1, "nome": coluna(dados, "OB PG")},
     ]
 
-    COLUNA_TRAMITADO = dados.columns.get_loc("TRAMITADO") + 1 # calculado pelo nome do cabeçalho, não fixo, pra não quebrar se a coluna mudar de lugar
+    COLUNA_TRAMITADO = dados.columns.get_loc(coluna(dados, "TRAMITADO")) + 1 # calculado pelo nome do cabeçalho, não fixo, pra não quebrar se a coluna mudar de lugar
+    COLUNA_PROCESSO = dados.columns.get_loc(col_processo) + 1 # p/ pintar a célula do processo de branco depois de tramitar
 
-    # agrupa por linha (processo), pois um mesmo processo pode ter OB ISS e OB PG pendentes ao mesmo tempo,
-    # e o processo só deve ser tramitado uma vez, depois de anexar todas as OBs pendentes dele
-    lista_processo = []
+    # agrupa por NÚMERO DE PROCESSO, não por linha: além de um processo poder ter OB ISS e OB PG
+    # pendentes na mesma linha, várias linhas podem ser do mesmo processo (ex: várias diárias numa
+    # célula "Processo" mesclada). O processo é buscado uma vez, todas as OBs pendentes dele são
+    # anexadas, e só então ele é tramitado uma única vez - tramitar tira o processo da fila do
+    # usuário, então tramitar por linha deixaria as OBs das outras linhas sem como anexar.
+    processos = {} # numero_processo -> {"processo", "despacho", "obs": [...], "linhas": set()}
     for linha in dados.index:
         linha_planilha = linha + 2 # linha do DataFrame começa em 0, a planilha em 2 (cabeçalho na linha 1)
 
         obs_pendentes = [
-            {"coluna": info["coluna"], "OB": str(dados.loc[linha, info["nome"]]).strip()}
+            {"linha_planilha": linha_planilha, "coluna": info["coluna"], "OB": str(dados.loc[linha, info["nome"]]).strip()}
             for info in COLUNAS_OB
             if cor_bate(cores.get((linha_planilha, info["coluna"])), AMARELO_CLARO_1)
             and "OB" in str(dados.loc[linha, info["nome"]]) # a mesma cor amarela também marca uma OP ainda pendente de assinatura/conversão em OB - só anexa quem já é OB de fato
         ]
-        if obs_pendentes:
-            lista_processo.append({
-                "linha_planilha": linha_planilha,
-                "processo": str(dados.loc[linha, "Processo"]).strip(),
-                "despacho": str(dados.loc[linha, "DESPACHO PROC"]).strip(), # coluna renomeada de "DESPACHO" na planilha
-                "obs": obs_pendentes,
-            })
+        if not obs_pendentes:
+            continue
+
+        numero_processo = str(dados.loc[linha, col_processo]).strip()
+        grupo = processos.setdefault(numero_processo, {"processo": numero_processo, "despacho": "", "obs": [], "linhas": set()})
+        grupo["obs"].extend(obs_pendentes)
+        grupo["linhas"].add(linha_planilha)
+        despacho_linha = str(dados.loc[linha, col_despacho]).strip()
+        if despacho_linha and not grupo["despacho"]: # 1º despacho não vazio do grupo (deve ser o mesmo em todas as linhas do processo)
+            grupo["despacho"] = despacho_linha
+
+    lista_processo = list(processos.values()) # dict preserva a ordem de inserção -> mantém a ordem da planilha
 
     # ------- Abre o Chrome maximizado -------
     options = webdriver.ChromeOptions()
@@ -134,12 +163,12 @@ def main(nome_planilha=None):
     navegador_suap.maximize_window()
 
     # ------- Entra na tela de login do Suap -------
-    # navegador_suap.get("https://suap.iff.edu.br/accounts/login/?next=/")  # pode ser o caminho de um arquivo local
-    navegador_suap.get("http://suap.dev.iff.edu.br/accounts/login/?next=/")
+    navegador_suap.get("https://suap.iff.edu.br/accounts/login/?next=/")  # pode ser o caminho de um arquivo local
+    # navegador_suap.get("http://suap.dev.iff.edu.br/accounts/login/?next=/")  # ambiente de homologação (dev)
 
     # ------- Faz o login no Suap -------
-    navegador_suap.find_element(By.ID, "id_username").send_keys("1882905")
-    navegador_suap.find_element(By.ID, "id_password").send_keys("Aj250104!" + Keys.ENTER)
+    navegador_suap.find_element(By.ID, "id_username").send_keys(credenciais_suap.usuario())
+    navegador_suap.find_element(By.ID, "id_password").send_keys(credenciais_suap.senha() + Keys.ENTER)
     time.sleep(10)
 
     for processo in lista_processo:
@@ -153,10 +182,10 @@ def main(nome_planilha=None):
         for info in processo["obs"]:
             try:
                 executar(navegador_suap, info["OB"])
-                pintar_celula_planilha.executar(aba, processo["linha_planilha"], info["coluna"], BRANCO)
+                pintar_celula_planilha.executar(aba, info["linha_planilha"], info["coluna"], BRANCO)
             except Exception as e:
                 print(f"Erro ao anexar a OB {info['OB']}: {e}")
-                pintar_celula_planilha.executar(aba, processo["linha_planilha"], info["coluna"], VERMELHO)
+                pintar_celula_planilha.executar(aba, info["linha_planilha"], info["coluna"], VERMELHO)
                 todas_anexadas = False
 
         # só tramita o processo se todas as OBs pendentes dele foram anexadas com sucesso;
@@ -164,12 +193,14 @@ def main(nome_planilha=None):
         if todas_anexadas and processo["despacho"]:
             try:
                 encaminhar_processo.executar(navegador_suap, processo["despacho"])
-                aba.update_cell(processo["linha_planilha"], COLUNA_TRAMITADO, "OK") # só marca se a tramitação realmente aconteceu
+                for linha_planilha in sorted(processo["linhas"]): # marca todas as linhas do processo (uma diária mesclada ocupa várias)
+                    aba.update_cell(linha_planilha, COLUNA_TRAMITADO, "OK") # só marca se a tramitação realmente aconteceu
+                    pintar_celula_planilha.executar(aba, linha_planilha, COLUNA_PROCESSO, BRANCO) # célula do processo (ciano) -> branco: processo concluído
             except Exception as e:
                 print(f"Erro ao tramitar o processo {processo['processo']}: {e}")
 
-        navegador_suap.get("http://suap.dev.iff.edu.br/")  # volta para a tela de início, onde tem o campo Busca rápida
-        # navegador_suap.get("http://suap.iff.edu.br/")
+        navegador_suap.get("https://suap.iff.edu.br/")  # volta para a tela de início, onde tem o campo Busca rápida
+        # navegador_suap.get("http://suap.dev.iff.edu.br/")  # ambiente de homologação (dev)
         time.sleep(10)
 
 if __name__ == "__main__":

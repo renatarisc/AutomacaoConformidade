@@ -5,6 +5,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support.ui import Select
 import time  # para fazer pausa
 
+import credenciais_suap
+
 def executar(navegador, var_despacho):
     botao_encaminhar = WebDriverWait(navegador, 10).until(EC.element_to_be_clickable((By.LINK_TEXT, 'Encaminhar')))
     botao_encaminhar.click()
@@ -36,7 +38,7 @@ def executar(navegador, var_despacho):
     campo_senha = WebDriverWait(navegador, 10).until(EC.element_to_be_clickable((By.ID, 'id_senha')))
     navegador.execute_script("arguments[0].scrollIntoView({block: 'center'});", campo_senha)
     time.sleep(1)
-    campo_senha.send_keys("Aj250104!")
+    campo_senha.send_keys(credenciais_suap.senha())
 
     botao_salvar = WebDriverWait(navegador, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='submit'][value='Salvar']")))
     navegador.execute_script("arguments[0].scrollIntoView({block: 'center'});", botao_salvar)

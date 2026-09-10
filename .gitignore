@@ -2,6 +2,7 @@ venv/
 __pycache__/
 *.pyc
 credenciais.json
+credenciais_suap.json
 contratos.db
 contratos_backups/
 build/
