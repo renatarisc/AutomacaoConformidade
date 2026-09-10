@@ -8,3 +8,5 @@ contratos_backups/
 build/
 dist/
 *.spec
+
+expressoes.txt
