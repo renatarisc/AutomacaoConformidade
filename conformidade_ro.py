@@ -47,6 +47,11 @@ import pintar_celula_planilha
 import conformidade as cf  # reaproveita comparadores, coleta de PDFs, montagem de tabela e a janela
 
 RE_PROCESSO = cf.ns.RE_PROCESSO
+# variante tolerante do RE_PROCESSO, so usada como fallback na OBSERVACAO da tela CONRO (texto
+# livre de largura fixa, que pode quebrar o processo em qualquer ponto, ex: "2026-\n91") - o
+# resultado sai com espaco/quebra de linha embutido, por isso quem usa isso sempre normaliza com
+# re.sub(r"\s+", "", ...) antes de comparar
+RE_CONRO_PROCESSO_LIVRE = re.compile(r"\d{5}\s*\.\s*\d{6}\s*\.\s*\d{4}\s*-\s*\d{2}")
 
 # amarelo claro 1 - mesmo amarelo padrao usado no relacionar_valor_op.py / baixar_ob.py / etc.
 AMARELO_CLARO_1 = (1, 217 / 255, 102 / 255)
@@ -57,9 +62,14 @@ RE_PAG1_PROCESSO_ELETRONICO = re.compile(r"Processo\s+Eletr.nico")
 RE_PAG1_SOLIC_EMPENHO = re.compile(r"Solicita..o de empenho")
 # marco que fecha um ciclo de empenho: o "Despacho: Sem ocorrencia" da conformidade OU o
 # "Certificado de Conformidade Sem Ocorrencia" (alguns processos trazem o certificado no lugar
-# do despacho) - o recorte da etapa mais recente comeca depois da ultima ocorrencia de qualquer um
+# do despacho) - o recorte da etapa mais recente comeca depois da ultima ocorrencia de qualquer um.
+# O despacho as vezes vem com o setor entre colchetes antes ("[COFCCI] - Sem ocorrência."), que
+# esse "\[.+?\]\s*-\s*" opcional cobre - confirmado ao vivo 2026-09-15 (processo 23322.000020.2026-91,
+# despacho #1261872, pág. 55): sem isso era o UNICO marco do PDF inteiro (71 paginas) e nao batia,
+# entao `corte` ficava em 0 e misturava todos os ciclos anteriores com o atual
 RE_MARCO_SEM_OCORRENCIA = re.compile(
-    r"(?:Despacho:\s*|Certificado\s+de\s+Conformidade\s+)Sem\s+ocorr.ncia", re.IGNORECASE
+    r"(?:Despacho:\s*(?:\[.+?\]\s*-\s*)?|Certificado\s+de\s+Conformidade\s+)Sem\s+ocorr.ncia",
+    re.IGNORECASE,
 )
 
 RE_CONRO_TITULO = re.compile(r"CONSULTA-CONRO|CONSULTA REGISTRO ORCAMENTARIO")
@@ -71,20 +81,6 @@ def _somar_valores(valores):
     return cf._float_para_valor_br(total)
 
 
-def _natureza_empenho_bd(contrato, numero_empenho):
-    # natureza de despesa (ex: "339039-25") cadastrada pro empenho especifico no banco -
-    # "" se o contrato/empenho nao esta cadastrado ou o empenho nao tem ND
-    if not contrato:
-        return ""
-    empenhos = list(contrato.get("empenhos", []))
-    for processo in contrato.get("processos_empenho", []):
-        empenhos.extend(processo.get("empenhos", []))
-    for e in empenhos:
-        if e.get("numero_empenho") == numero_empenho:
-            return e.get("natureza_despesa") or ""
-    return ""
-
-
 # ======= Documento 1: Solicitacao de Empenho (tela SIAFI CONSULTA-CONRO da NC) =======
 
 # "SOLICITACAO DE EMPENHO DO CONTRATO N 17/2023 COM A EMPRESA PRIME ..., REFERENTE ..." ou, quando
@@ -94,7 +90,11 @@ RE_CONRO_SOLIC_CONTRATO = re.compile(
     r"SOLICITA..O DE EMPENHO D[AO]\s+(?:CONTRATO|CONTRATA..O)\s+(?:N.?\s*)?(\d+/\d{4})"
 )
 RE_CONRO_DOC_WEB_NC = re.compile(r"DOCUMENTO WEB\s*:\s*(2026NC\d+)")
-RE_CONRO_EMPRESA = re.compile(r"COM A EMPRESA\s+(.+?)\s*,\s*REFERENTE", re.DOTALL)
+# "COM A EMPRESA X, REFERENTE" (contrato) OU "DA EMPRESA X, REFERENTE" (contratação direta) -
+# para no 1º "," em vez de exigir "REFERENTE" completo porque a extração do PDF pode quebrar
+# essa palavra no meio ("REFER\nENTE", quebra de linha da tela de largura fixa do SIAFI) -
+# confirmado ao vivo pelo usuário 2026-09-14 (empresa BONJE GAS LTDA não era achada)
+RE_CONRO_EMPRESA = re.compile(r"(?:COM\s+A|DA)\s+EMPRESA\s+(.+?)\s*,", re.DOTALL)
 # linha de evento da tela de eventos: "001 301202 ... 14.222,41" (evento + valor no fim)
 RE_CONRO_EVENTO_VALOR = re.compile(r"^\s*\d{3}\s+(\d{6})\b.*?(\d{1,3}(?:\.\d{3})*,\d{2})\s*$", re.M)
 # linha da celula orcamentaria (logo abaixo da linha de evento):
@@ -130,7 +130,137 @@ def _valor_total_conro(texto):
     return valores[-1][1] if valores else ""
 
 
-def processar_solicitacao_empenho(nome_arquivo, paginas, contrato, corte):
+# ======= Documento 0: Requerimento de Empenho (formulario nativo do Suap, ANTES da tela SIAFI) =======
+# "REQUERIMENTO nn/aaaa ... SOLICITAÇÃO DE EMPENHO DE CONTRATO" - preenchido pelo requisitante do
+# setor, normalmente a 1ª pagina do ciclo (antes da Solicitacao de Empenho/tela SIAFI sequer
+# existir). Texto limpo (sem a corrupcao de acento das telas verdes SIAFI), mas quebra numeros em
+# varias linhas por causa da formatacao em negrito/tabela do Suap - todo regex usa \s*\n?\s* entre
+# os grupos por causa disso.
+RE_REQ_NUMERO = re.compile(r"REQUERIMENTO\s+(\d+/\d{4})")
+RE_REQ_CONTRATO = re.compile(r"Solicita..o de empenho do contrato\s*\n?\s*(\d+/\d{4})", re.IGNORECASE)
+RE_REQ_OBJETO = re.compile(r"OBJETO:\s*\n?(.+?)\n\s*VALOR:", re.DOTALL | re.IGNORECASE)
+# o campo OBJETO inteiro é um preâmbulo padrão ("Solicitação de empenho do contrato X/aaaa,
+# referente ao exercício de aaaa, para o campus NOME referente a <objeto real>.") - a redação do
+# preâmbulo varia (às vezes tem "campus NOME" antes do "referente a" final, às vezes não, e pode
+# ter um "referente a"/"referente ao" mais cedo também, ex: "referente ao exercício de") -
+# comparar_textos só aceita prefixo/início igual, então isola o trecho depois da ÚLTIMA ocorrência
+# de "referente a[s]", que é sempre o objeto real, não importa o que veio antes
+RE_REQ_REFERENTE_A = re.compile(r"referente\s*\n?\s*a[s]?\s+", re.IGNORECASE)
+
+
+def _objeto_real_requerimento(texto_objeto):
+    partes = RE_REQ_REFERENTE_A.split(texto_objeto)
+    return partes[-1] if len(partes) > 1 else texto_objeto
+RE_REQ_VALOR_TOTAL = re.compile(r"VALOR:\s*\n?\s*R\$\s*\n?\s*([\d.]+,\d{2})", re.IGNORECASE)
+RE_REQ_EMPRESA = re.compile(r"EMPRESA:\s*\n?\s*(.+?)\s*\n", re.IGNORECASE)
+RE_REQ_CNPJ = re.compile(r"CNPJ:\s*\n?\s*([\d./-]+)", re.IGNORECASE)
+# recorte só da tabela de itens (do cabeçalho "Valor total" até "EMPRESA:") - importante NÃO
+# buscar "R$ x,xx" na página inteira, porque o próprio "VALOR: R$ x,xx" do requerimento (linha
+# ANTES da tabela) também bateria e desalinharia a paridade unitário/total dos itens
+RE_REQ_TABELA_ITENS = re.compile(r"Valor total\s*\n(.+?)\n\s*EMPRESA:", re.DOTALL | re.IGNORECASE)
+# valores "R$ x,xx" dentro do recorte acima (Item/Descrição/Quantidade/Valor unitário/Valor
+# total) - confirmado ao vivo que a extração alterna unitário/total por item, nessa ordem
+# ("02 P45 16 R$ 425,92 R$ 6.814,72"), entao os de indice IMPAR (1, 3, 5...) sao os totais
+RE_REQ_VALOR_ITEM = re.compile(r"R\$\s*([\d.]+,\d{2})")
+
+
+def processar_requerimento_empenho(nome_arquivo, paginas, contrato, corte):
+    # devolve (blocos, requerimentos) - requerimentos e a lista (em ordem de pagina) dos valores
+    # que cada Requerimento declara, pra Solicitacao de Empenho (NC) conferir contra - o
+    # Requerimento vem ANTES da tela SIAFI no processo, entao ele e a fonte segura do Valor da NC
+    # (nao o contrario): pedido do usuario 2026-09-14, "o requerimento passa a ser a fonte segura
+    # para a NC"
+    blocos, requerimentos = [], []
+
+    # esse formulario (com a tabela de itens) so existe em contratos de ALMOXARIFADO - contrato de
+    # SERVICO tem um "REQUERIMENTO nn/aaaa" com layout diferente (sem essa tabela/campos), que os
+    # regex abaixo nao reconhecem - sem esse filtro, um requerimento de servico virava um bloco
+    # inteiro "nao encontrado" em vez de simplesmente nao aparecer (pedido do usuario 2026-09-14)
+    if contrato and contrato.get("tipo_contrato") != "almoxarifado":
+        return blocos, requerimentos
+
+    for idx in range(corte, len(paginas)):
+        texto = paginas[idx]
+        m_numero = RE_REQ_NUMERO.search(texto)
+        if not m_numero:
+            continue  # nao e a pagina do Requerimento
+
+        linhas = []
+
+        m_contrato = RE_REQ_CONTRATO.search(texto)
+        doc_contrato = m_contrato.group(1) if m_contrato else ""
+        contrato_bd = contrato["numero_contrato"] if contrato else ""
+        linhas.append(cf.linha_tabela(
+            "Contrato",
+            f"{contrato_bd} (BD)" if contrato_bd else "contrato não encontrado no banco", bool(contrato_bd),
+            doc_contrato or "não encontrado", bool(doc_contrato),
+            cf.comparar_numeros(contrato_bd, doc_contrato) if (contrato_bd and doc_contrato) else None,
+        ))
+
+        m_objeto = RE_REQ_OBJETO.search(texto)
+        doc_objeto = re.sub(r"\s+", " ", _objeto_real_requerimento(m_objeto.group(1))).strip() if m_objeto else ""
+        fonte_objeto_texto, fonte_objeto_disp, bate_objeto = cf._conferir_objeto(contrato, doc_objeto)
+        linhas.append(cf.linha_tabela(
+            "Objeto", fonte_objeto_texto, fonte_objeto_disp, doc_objeto or "não encontrado", bool(doc_objeto), bate_objeto,
+        ))
+
+        m_valor = RE_REQ_VALOR_TOTAL.search(texto)
+        doc_valor = m_valor.group(1) if m_valor else ""
+
+        # se tem mais de 1 item, confere se a soma dos "Valor total" de cada item bate com o
+        # VALOR geral do requerimento - com só 1 item a checagem seria redundante (o próprio
+        # "Valor total" do item já É o valor geral)
+        m_tabela = RE_REQ_TABELA_ITENS.search(texto)
+        valores_tabela = RE_REQ_VALOR_ITEM.findall(m_tabela.group(1)) if m_tabela else []  # [unit1, total1, ...]
+        totais_itens = valores_tabela[1::2]
+        if len(totais_itens) > 1:
+            soma_itens = _somar_valores(totais_itens)
+            linhas.append(cf.linha_tabela(
+                "Soma dos Itens",
+                f"{' + '.join(totais_itens)} = {soma_itens}", True,
+                doc_valor or "não encontrado", bool(doc_valor),
+                cf._valores_monetarios_batem(soma_itens, doc_valor) if doc_valor else None,
+            ))
+
+        m_empresa = RE_REQ_EMPRESA.search(texto)
+        doc_empresa = cf.limpar_espacos(m_empresa.group(1)) if m_empresa else ""
+        contratada_bd = contrato["nome_contratada"] if contrato else ""
+        linhas.append(cf.linha_tabela(
+            "Empresa",
+            f"{contratada_bd} (BD)" if contratada_bd else "contrato não encontrado no banco", bool(contratada_bd),
+            doc_empresa or "não encontrada", bool(doc_empresa),
+            cf.comparar_textos(contratada_bd, doc_empresa) if (contratada_bd and doc_empresa) else None,
+        ))
+
+        m_cnpj = RE_REQ_CNPJ.search(texto)
+        doc_cnpj = re.sub(r"\D", "", m_cnpj.group(1)) if m_cnpj else ""
+        cnpj_bd = contrato["cnpj"] if contrato else ""
+        linhas.append(cf.linha_tabela(
+            "CNPJ",
+            f"{cf._formatar_cnpj(cnpj_bd)} (BD)" if cnpj_bd else "contrato não encontrado no banco", bool(cnpj_bd),
+            cf._formatar_cnpj(doc_cnpj) if doc_cnpj else "não encontrado", bool(doc_cnpj),
+            cf.comparar_cnpjs(cnpj_bd, doc_cnpj) if (cnpj_bd and doc_cnpj) else None,
+        ))
+
+        titulo = f"Requerimento de Empenho {m_numero.group(1)}"
+        observacao = f"Valor: {doc_valor}" if doc_valor else None
+        blocos.append(cf.montar_tabela(nome_arquivo, titulo, idx + 1, linhas, observacao=observacao))
+        requerimentos.append({"pagina": idx + 1, "valor": doc_valor})
+
+    return blocos, requerimentos
+
+
+def _requerimento_anterior(requerimentos, pagina):
+    # o ultimo Requerimento de Empenho que aparece ANTES desta pagina - mesmo raciocinio de
+    # _referencia_anterior, mas pro Requerimento (que vem antes da tela SIAFI no processo)
+    anterior = None
+    for r in requerimentos:
+        if r["pagina"] < pagina:
+            anterior = r
+    return anterior
+
+
+def processar_solicitacao_empenho(nome_arquivo, paginas, contrato, requerimentos, processo_p1, corte):
     # devolve (blocos, referencias) - referencias e a lista (em ordem de pagina) dos dados
     # orcamentarios que cada Solicitacao determina, pros documentos seguintes conferirem contra
     blocos, referencias = [], []
@@ -177,28 +307,36 @@ def processar_solicitacao_empenho(nome_arquivo, paginas, contrato, corte):
             cf.comparar_textos(contratada_bd, doc_empresa) if (contratada_bd and doc_empresa) else None,
         ))
 
+        # RE_CONRO_PROCESSO_LIVRE (fallback) porque a OBSERVACAO as vezes quebra o processo bem
+        # antes do fim ("2026-\n91") - confirmado ao vivo 2026-09-15 (23322.000020.2026-91)
+        m_processo = RE_PROCESSO.search(texto) or RE_CONRO_PROCESSO_LIVRE.search(texto)
+        doc_processo = re.sub(r"\s+", "", m_processo.group()) if m_processo else ""
+        linhas.append(cf.linha_tabela(
+            "Processo",
+            f"{processo_p1} (pág. 1)" if processo_p1 else "nao encontrado", bool(processo_p1),
+            doc_processo or "nao encontrado", bool(doc_processo),
+            cf.comparar_textos(processo_p1, doc_processo) if (processo_p1 and doc_processo) else None,
+        ))
+
+        req = _requerimento_anterior(requerimentos, idx + 1)
+        req_valor = req["valor"] if req else ""
         ptres, fonte, nds, pis = _celula_orcamentaria(texto)
         valor = _valor_total_conro(texto)
+        linhas.append(cf.linha_tabela(
+            "Valor",
+            f"{req_valor} (Requerimento)" if req_valor else "sem Requerimento anterior", bool(req_valor),
+            valor or "nao encontrado", bool(valor),
+            cf._valores_monetarios_batem(req_valor, valor) if (req_valor and valor) else None,
+        ))
 
-        partes = []
-        if ptres:
-            partes.append(f"PTRES: {ptres}")
-        if fonte:
-            partes.append(f"Fonte: {fonte}")
-        if nds:
-            partes.append(f"ND: {cf.ns.juntar_com_e(nds)}")
-        if pis:
-            partes.append(f"PI: {cf.ns.juntar_com_e(pis)}")
-        if valor:
-            partes.append(f"Valor: {valor}")
+        # PTRES/Fonte/ND/PI continuam extraídos (ptres, fonte, nds, pis) e guardados em
+        # `referencias` pra Dotação/RO da NE conferirem contra - só a exibição na nota vermelha
+        # deste bloco foi removida (pedido do usuário 2026-09-14: só Contrato/Contratada/Valor)
 
         # nome no padrao "Registro Orçamentário <RO>-<NC>"
         partes_titulo = "-".join(p for p in (ro_numero, nc_numero) if p)
         titulo = f"Registro Orçamentário {partes_titulo}" if partes_titulo else "Registro Orçamentário"
-        blocos.append(cf.montar_tabela(
-            nome_arquivo, titulo, idx + 1, linhas,
-            observacao=" | ".join(partes) if partes else None,
-        ))
+        blocos.append(cf.montar_tabela(nome_arquivo, titulo, idx + 1, linhas))
         referencias.append({
             "pagina": idx + 1, "ro": ro_numero,
             "ptres": ptres, "fonte": fonte, "nds": nds, "pis": pis, "valor": valor,
@@ -221,6 +359,30 @@ def _referencia_anterior(referencias, pagina):
 
 RE_DOT_ASSUNTO = re.compile(r"Assunto:\s*Dota..o Or.ament.ria", re.IGNORECASE)
 RE_DOT_DESPACHO = re.compile(r"DESPACHO\s+(\d+/\d{4})")
+# quando um despacho pede a retificação de outro ("... PARA VERIFICAÇÃO/RETIFICAÇÃO DO DESPACHO
+# 288/2026.") o despacho retificado deixa de valer - só o que retifica (o mais recente) deve ser
+# considerado. Nem todo processo tem isso (pedido do usuário 2026-09-14: "isso pode não ocorrer")
+RE_DOT_RETIFICACAO_DE = re.compile(r"RETIFICA..O\s+DO\s+DESPACHO\s+(?:N.?\s*)?(\d+/\d{4})", re.IGNORECASE)
+
+# despacho "Encaminho para dotação orçamentária: Valor: R$ X | Nota de Empenho: 2026NExxxxxx" -
+# geralmente em contratos de SERVIÇO (não tem o Requerimento de Empenho, que é do fluxo de
+# material/almoxarifado) - quando existe, mostra como nota vermelha (não como coluna) na tabela
+# "Consistência Orçamentária entre Documentos", pro usuário conferir visualmente contra a RO da NE.
+# Nem todo processo tem esse despacho (pedido do usuário 2026-09-14: "geralmente nos contratos de
+# serviço")
+RE_DESP_ENCAMINHA_DOTACAO = re.compile(
+    r"Encaminho\s+para\s+dota..o\s+or.ament.ria.*?Valor:\s*\n?\s*R\$\s*\n?\s*([\d.]+,\d{2})"
+    r".*?Nota\s+de\s+Empenho:\s*\n?\s*(2026NE\d+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _nota_solicitacao_servico(paginas, corte):
+    for pagina in paginas[corte:]:
+        m = RE_DESP_ENCAMINHA_DOTACAO.search(pagina)
+        if m:
+            return f"Solicitação: R$ {m.group(1)} | {m.group(2)}"
+    return None
 # uma linha de alocacao vem como um bloco de linhas: UG / PTRES / FONTE / ND / UGR / PI / VALOR.
 # O valor as vezes vem com "R$" na frente (23.pdf), as vezes sem (26.pdf) - por isso opcional
 RE_DOT_ALOCACAO = re.compile(
@@ -231,15 +393,26 @@ RE_DOT_ALOCACAO = re.compile(
 # de linha em volta do hifen ("339039 - 17", "339039-\n17") e as vezes troca o "-" por
 # en/em-dash - aceita tudo isso, mas exige algum traco separando (sem ele, "339039" casaria
 # com qualquer "17" solto perto na tela)
-RE_DOT_SUBELEMENTO = re.compile(r"\b(\d{6})\s*[-‐-―]\s*(\d{2})\b")
+# o "nd" capturado aqui às vezes sai com 1 dígito a menos do que deveria (ex: "39039-78" em vez
+# de "339039-78" no texto descritivo do subelemento, mesmo com a tabela estruturada acima
+# mostrando "339039" certo) - confirmado ao vivo 2026-09-15 contra o documento real, não é
+# artefato de extração do PDF, o próprio texto do despacho vem assim. Por isso \d{5,6} (tolerante)
+# em vez de \d{6} fixo, e quem usa isso reconstrói o ND a partir de `doc_nds` (a tabela
+# estruturada, sempre correta), não do nd capturado aqui - só o subelemento (2 dígitos) importa.
+# NÃO usar \d{4,6}: 4 dígitos bate com o "aaaa-nn" do número do processo (ex: "2026-91"), gerando
+# um subelemento falso - confirmado ao vivo (deu "Subelemento: 91 e 78" com \d{4,6})
+RE_DOT_SUBELEMENTO = re.compile(r"\b(\d{5,6})\s*[-‐-―]\s*(\d{2})\b")
 
 
-def _linha_igualdade(campo, esperado, obtido, igual):
-    # esperado (fonte segura) vem da NC (Registro Orcamentario) anterior; obtido, deste documento
+def _linha_igualdade(campo, esperado, obtido, igual, rotulo="NC"):
+    # esperado (fonte segura) vem da NC (Registro Orcamentario) anterior; obtido, deste documento.
+    # rotulo: CLAS.ORC é a exceção - a NC não relata subelemento, quem preenche `clas_orc` no
+    # `ref` compartilhado é a Dotação Orçamentária (ver _ORC_DOTACAO_VIA_REF) - "(NC)" sozinho
+    # seria enganoso ali, por isso o rotulo "NC + Dotação" nesse caso
     tem_ref = bool(esperado)
     return cf.linha_tabela(
         campo,
-        (esperado + " (NC)") if tem_ref else "sem NC anterior", tem_ref,
+        (f"{esperado} ({rotulo})") if tem_ref else f"sem {rotulo} anterior", tem_ref,
         obtido or "nao encontrado", bool(obtido),
         igual if (tem_ref and obtido) else None,
     )
@@ -248,11 +421,42 @@ def _linha_igualdade(campo, esperado, obtido, igual):
 def processar_dotacao_orcamentaria(nome_arquivo, paginas, processo_p1, referencias, corte):
     blocos = []
 
+    # despachos que algum outro despacho do ciclo pediu pra retificar - excluidos abaixo, so o
+    # despacho retificador (mais recente) e considerado
+    despachos_retificados = {
+        m.group(1) for pagina in paginas[corte:] for m in RE_DOT_RETIFICACAO_DE.finditer(pagina)
+    }
+
+    # pagina de cada despacho "Assunto: Dotacao Orcamentaria" do ciclo (inclusive os retificados,
+    # que nao geram bloco) - so pra anotar "Retificação do X/aaaa (pág. N)" no despacho retificador
+    pagina_por_despacho = {}
+    for idx in range(corte, len(paginas)):
+        if not RE_DOT_ASSUNTO.search(paginas[idx]):
+            continue
+        m = RE_DOT_DESPACHO.search(cf.remover_duplicatas_consecutivas(paginas[idx]))
+        if m:
+            pagina_por_despacho[m.group(1)] = idx + 1
+
     for idx in range(corte, len(paginas)):
         texto_pag = paginas[idx]
         if not RE_DOT_ASSUNTO.search(texto_pag):
             continue
         texto = cf.remover_duplicatas_consecutivas(texto_pag)  # esse despacho vem com cada linha duplicada
+
+        m_desp_atual = RE_DOT_DESPACHO.search(texto)
+        if m_desp_atual and m_desp_atual.group(1) in despachos_retificados:
+            continue  # despacho retificado por outro - nao entra na conferencia
+
+        # este despacho sobreviveu ao filtro acima - se algum outro foi retificado no ciclo,
+        # assume que é este que retifica (caso comum: só sobra 1 despacho quando há retificação)
+        retificados_por_este = [n for n in despachos_retificados if n != (m_desp_atual.group(1) if m_desp_atual else None)]
+        nota_retificacao = None
+        if retificados_por_este:
+            partes_retificacao = [
+                f"{n} (pág. {pagina_por_despacho[n]})" if n in pagina_por_despacho else n
+                for n in retificados_por_este
+            ]
+            nota_retificacao = f"Retificação do {' e '.join(partes_retificacao)}"
 
         ref = _referencia_anterior(referencias, idx + 1)
 
@@ -301,18 +505,26 @@ def processar_dotacao_orcamentaria(nome_arquivo, paginas, processo_p1, referenci
 
         # subelemento: "339039-25 TAXA DE ADMINISTRACAO ..." -> subelemento 25. Guarda na
         # referencia (ND + subelemento sem pontuacao, ex: "33903925") pro RO da NE conferir
-        # a CLAS.ORC contra, e mostra no bloco vermelho
-        pares_sub = list(dict.fromkeys(RE_DOT_SUBELEMENTO.findall(texto)))  # [(nd, sub), ...]
+        # a CLAS.ORC contra, e mostra no bloco vermelho. O ND usado aqui vem de `doc_nds` (a
+        # tabela estruturada, sempre com 6 dígitos certos) - NÃO do "nd" capturado por
+        # RE_DOT_SUBELEMENTO, que às vezes sai truncado (ver comentário do regex)
+        pares_sub = list(dict.fromkeys(RE_DOT_SUBELEMENTO.findall(texto)))  # [(nd_bruto, sub), ...]
+        nds_confiaveis = doc_nds or [nd_bruto for nd_bruto, _ in pares_sub]
         if ref is not None:
-            for nd, sub in pares_sub:
-                if nd + sub not in ref["clas_orc"]:
-                    ref["clas_orc"].append(nd + sub)
+            for _, sub in pares_sub:
+                for nd in nds_confiaveis:
+                    if nd + sub not in ref["clas_orc"]:
+                        ref["clas_orc"].append(nd + sub)
         # o subelemento e so o que vem depois do traco ("339039-25" -> "25")
         subelementos = list(dict.fromkeys(sub for _, sub in pares_sub))
-        observacao = f"Subelemento: {cf.ns.juntar_com_e(subelementos)}" if subelementos else None
+        partes_observacao = []
+        if nota_retificacao:
+            partes_observacao.append(nota_retificacao)
+        if subelementos:
+            partes_observacao.append(f"Subelemento: {cf.ns.juntar_com_e(subelementos)}")
+        observacao = " | ".join(partes_observacao) if partes_observacao else None
 
-        m_desp = RE_DOT_DESPACHO.search(texto)
-        titulo = f"Dotação Orçamentária — Despacho {m_desp.group(1)}" if m_desp else "Dotação Orçamentária"
+        titulo = f"Dotação Orçamentária — Despacho {m_desp_atual.group(1)}" if m_desp_atual else "Dotação Orçamentária"
         blocos.append(cf.montar_tabela(nome_arquivo, titulo, idx + 1, linhas, observacao=observacao))
 
     return blocos
@@ -327,9 +539,21 @@ RE_RONE_CEL_ORCAMENTARIA = re.compile(
 # tela de eventos: "001 401202 ... 33903925" e o valor na linha de baixo
 RE_RONE_CLAS_ORC = re.compile(r"CLAS\.CONT\s+CLAS\.ORC.*?\n\s*\d{3}\s+\d{6}\D*?(\d{8})\b", re.S)
 RE_RONE_VALOR_EVENTO = re.compile(r"\b\d{8}\b\s*\n\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
+# codigo do evento (linha "001 401201"/"001 401202"/"001 401203") - 401201 = empenho original
+# (unico que tem Processo/Processo de Contratação na OBSERVACAO); 401202 (reforço) e 401203
+# (cancelamento) tem uma OBSERVACAO diferente ("REGISTRO DE ANULACAO/REFORCO/CANCELAMENTO DO
+# EMPENHO...", sem processo nenhum) - confirmado pelo usuário 2026-09-15, não é bug de extração
+RE_RONE_EVENTO = re.compile(r"^\s*\d{3}\s+(4012\d{2})\b", re.M)
+# OBSERVACAO da tela: "... PROCESSO nnnnn.nnnnnn.aaaa-nn (nnnnn.nnnnnn.aaaa-nn)" - o 1º é o
+# processo corrente (confere contra a pág. 1), o 2º (entre parênteses) é o processo de
+# contratação (confere contra o BD) - mesmo formato usado no CONOB/CONNS, valor diferente.
+# \s* entre os grupos porque o nº entre parênteses pode quebrar de linha no meio (a extração do
+# PDF segue a quebra de linha visual da tela: "...  (23323\n.001539.2024-14)") - confirmado
+# ao vivo pelo usuário 2026-09-14
+RE_RONE_PROCESSO_CONTRATACAO = re.compile(r"\((\d{5}\s*\.\s*\d{6}\s*\.\s*\d{4}\s*-\s*\d{2})\)")
 
 
-def processar_ro_da_ne(nome_arquivo, paginas, contrato, referencias, corte):
+def processar_ro_da_ne(nome_arquivo, paginas, contrato, referencias, corte, processo_p1):
     # coleta todas as telas RO da NE do ciclo (com FAVORECIDO + DOCUMENTO WEB 2026NE...);
     # o valor total empenhado costuma ser dividido entre 2+ ROs da NE - a SOMA delas e que
     # tem que fechar com o valor da Solicitacao de Empenho
@@ -371,7 +595,6 @@ def processar_ro_da_ne(nome_arquivo, paginas, contrato, referencias, corte):
     ref_valor = ref["valor"] if ref else ""
     ref_clas_orc = ref["clas_orc"] if ref else []
 
-    empenhos_bd = cf.empenhos_registrados(contrato) if contrato else []
     cnpj_bd = contrato["cnpj"] if contrato else ""
     contratada_bd = contrato["nome_contratada"] if contrato else ""
 
@@ -397,6 +620,30 @@ def processar_ro_da_ne(nome_arquivo, paginas, contrato, referencias, corte):
             cf.comparar_textos(contratada_bd, doc_favorecido) if (contratada_bd and doc_favorecido) else None,
         ))
 
+        # Processo/Processo de Contratação só existem na OBSERVACAO do evento 401201 (empenho
+        # original) - 401202 (reforço)/401203 (cancelamento) tem outra OBSERVACAO sem processo
+        # nenhum, então nem tenta essas 2 linhas nesse caso (evita "não encontrado" enganoso)
+        m_evento = RE_RONE_EVENTO.search(texto)
+        if not m_evento or m_evento.group(1) == "401201":
+            m_proc = cf.RE_SIAFI_PROCESSO_PONTUADO.search(texto)
+            doc_processo = m_proc.group(1) if m_proc else ""
+            linhas.append(cf.linha_tabela(
+                "Processo",
+                f"{processo_p1} (pág. 1)" if processo_p1 else "processo da capa não identificado", bool(processo_p1),
+                doc_processo or "não encontrado", bool(doc_processo),
+                cf._mesmos_digitos(processo_p1, doc_processo) if (processo_p1 and doc_processo) else None,
+            ))
+
+            m_proc_contratacao = RE_RONE_PROCESSO_CONTRATACAO.search(texto)
+            doc_processo_contratacao = re.sub(r"\s+", "", m_proc_contratacao.group(1)) if m_proc_contratacao else ""
+            processo_contratacao_bd = contrato.get("processo_contratacao") if contrato else ""
+            linhas.append(cf.linha_tabela(
+                "Processo de Contratação",
+                f"{processo_contratacao_bd} (BD)" if processo_contratacao_bd else "contrato não encontrado no banco", bool(processo_contratacao_bd),
+                doc_processo_contratacao or "não encontrado", bool(doc_processo_contratacao),
+                cf._mesmos_digitos(processo_contratacao_bd, doc_processo_contratacao) if (processo_contratacao_bd and doc_processo_contratacao) else None,
+            ))
+
         m_cel = RE_RONE_CEL_ORCAMENTARIA.search(texto)
         doc_ptres = m_cel.group(1) if m_cel else ""
         doc_fonte = m_cel.group(2) if m_cel else ""
@@ -418,6 +665,7 @@ def processar_ro_da_ne(nome_arquivo, paginas, contrato, referencias, corte):
         linhas.append(_linha_igualdade(
             "CLAS.ORC", cf.ns.juntar_com_e(ref_clas_orc) if ref_clas_orc else "",
             doc_clas_orc, doc_clas_orc in ref_clas_orc,
+            rotulo="NC + Dotação",
         ))
 
         linhas.append(cf.linha_tabela(
@@ -427,35 +675,8 @@ def processar_ro_da_ne(nome_arquivo, paginas, contrato, referencias, corte):
             cf._valores_monetarios_batem(ref_valor, soma_valor) if (ref_valor and soma_valor) else None,
         ))
 
-        m_ne = RE_RONE_DOC_WEB_NE.search(texto)
-        ne = m_ne.group(1) if m_ne else ""
-        m_valor_ro = RE_RONE_VALOR_EVENTO.search(texto)
-        valor_ro = m_valor_ro.group(1) if m_valor_ro else ""
-        partes = []
-        if valor_ro:
-            partes.append(f"Valor desta RO: {valor_ro}")
-        if ne:
-            if ne in empenhos_bd:
-                nd_bd = _natureza_empenho_bd(contrato, ne)
-                # ND do documento = CLAS.ORC (natureza + subelemento, ex "33903925"); cai pra
-                # ND da celula orcamentaria + subelemento da Dotacao (ref_clas_orc) se faltar
-                nd_doc = doc_clas_orc or (ref_clas_orc[0] if ref_clas_orc else "")
-                if nd_bd and nd_doc and not cf._mesmos_digitos(nd_bd, nd_doc):
-                    situacao = (f"Empenho {ne} — já cadastrado no BD, mas a ND {nd_bd} "
-                                f"não confere com o documento ({nd_doc})")
-                elif nd_bd:
-                    situacao = f"Empenho {ne} e ND {nd_bd} — já cadastrado no BD"
-                else:
-                    situacao = f"Empenho {ne} — já cadastrado no BD, sem ND cadastrada"
-            else:
-                situacao = f"Empenho {ne} — não cadastrado no BD"
-            partes.append(situacao)
-
         titulo = f"RO da NE — {ro_numero}" if ro_numero else "RO da NE"
-        blocos.append(cf.montar_tabela(
-            nome_arquivo, titulo, idx + 1, linhas,
-            observacao=" | ".join(partes) if partes else None,
-        ))
+        blocos.append(cf.montar_tabela(nome_arquivo, titulo, idx + 1, linhas))
 
     return blocos, nes
 
@@ -524,69 +745,90 @@ def _nome_curto_documento_ro(titulo):
     return titulo
 
 
-def processar_consistencia_documentos_ro(nome_arquivo, blocos, referencias, contrato, processo_p1):
-    # roda DEPOIS dos processadores de documento (precisa dos blocos prontos). A Solicitacao de
-    # Empenho (tela SIAFI da NC) guarda PTRES/Fonte/ND/PI/Valor na observacao (nao como linha),
-    # entao entra aqui so como FONTE segura, via 'referencias' - a ultima do recorte e a referencia.
-    # Rotulo "(NC)" (nao "(Solicitação)") pra bater com os blocos da Dotacao / RO da NE
+# campos "1 fonte segura x N documentos" (tabela de 2 colunas) x campos orçamentários, que os 3
+# documentos (NC/Dotação/RO da NE) relatam cada um com o mesmo peso - por isso viram uma coluna
+# por documento em vez de "fonte segura x documento" (pedido do usuário 2026-09-14)
+_CAMPOS_DUAS_COLUNAS_RO = ["Contrato", "Contratada", "CNPJ", "Processo"]
+_CAMPOS_ORCAMENTARIOS_RO = ["PTRES", "Fonte", "Natureza de Despesa", "PI", "Valor", "CLAS.ORC"]
+_COLUNAS_ORCAMENTARIAS_RO = ["RO da NC", "Dotação Orçamentária", "RO da NE"]
+
+# campo orçamentário -> chave em `referencias` (valor lido da própria tela da NC) - CLAS.ORC não
+# tem chave própria porque a NC não relata subelemento, só a Dotação (ver _ORC_DOTACAO_VIA_REF)
+_ORC_CAMPO_PARA_CHAVE_REF = {
+    "PTRES": "ptres", "Fonte": "fonte", "Natureza de Despesa": "nds",
+    "PI": "pis", "Valor": "valor", "CLAS.ORC": None,
+}
+# CLAS.ORC da Dotação não vira "linha" no bloco dela (só entra na observação em vermelho) - o
+# valor que ela contribuiu só existe em `referencias` (clas_orc), preenchido por
+# processar_dotacao_orcamentaria
+_ORC_DOTACAO_VIA_REF = {"CLAS.ORC": "clas_orc"}
+
+
+def _valor_referencia(ref, chave):
+    if not ref or not chave:
+        return ""
+    valor = ref.get(chave)
+    if isinstance(valor, list):
+        return cf.ns.juntar_com_e(valor) if valor else ""
+    return valor or ""
+
+
+def _valores_por_documento_ro(campo, rotulos, blocos):
+    # nome curto do documento -> lista de valores achados nas linhas dos blocos (pode ter mais de
+    # 1 quando há reforço, ex: 2 telas "RO da NE" no mesmo ciclo)
+    por_doc = {}
+    for bloco in blocos:
+        nome = _nome_curto_documento_ro(bloco["documento"])
+        for linha in bloco["linhas"]:
+            if linha["campo"] in rotulos and linha["documento_disponivel"]:
+                valor = linha["documento"]
+                if campo == "Valor":
+                    valor = _valor_consistencia(valor)
+                por_doc.setdefault(nome, []).append(valor)
+    return por_doc
+
+
+def processar_consistencia_documentos_ro(nome_arquivo, blocos, referencias, nota_solicitacao=None):
+    # roda DEPOIS dos processadores de documento (precisa dos blocos prontos). So a consistencia
+    # orcamentaria (RO da NC x Dotacao Orcamentaria x RO da NE) - Contrato/Contratada/CNPJ/Processo
+    # nao entram mais aqui, pedido do usuario 2026-09-14 (ficava redundante com a linha "Processo"
+    # que cada documento ja confere individualmente contra a pag. 1 / BD).
     ref = referencias[-1] if referencias else None
-    cnpj_bd = cf._formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else ""
 
-    fontes = {
-        "Contrato": (f"{contrato['numero_contrato']} (BD)" if contrato else "contrato não encontrado no banco",
-                     bool(contrato), contrato["numero_contrato"] if contrato else ""),
-        "Contratada": (f"{contrato['nome_contratada']} (BD)" if contrato else "contrato não encontrado no banco",
-                       bool(contrato), contrato["nome_contratada"] if contrato else ""),
-        "CNPJ": (f"{cnpj_bd} (BD)" if cnpj_bd else "contrato não encontrado no banco", bool(cnpj_bd), cnpj_bd),
-        "Processo": (f"{processo_p1} (pág. 1)" if processo_p1 else "não encontrado", bool(processo_p1), processo_p1 or ""),
-        "PTRES": (f"{ref['ptres']} (NC)" if ref and ref["ptres"] else "sem NC anterior",
-                  bool(ref and ref["ptres"]), ref["ptres"] if ref else ""),
-        "Fonte": (f"{ref['fonte']} (NC)" if ref and ref["fonte"] else "sem NC anterior",
-                  bool(ref and ref["fonte"]), ref["fonte"] if ref else ""),
-        "Natureza de Despesa": (
-            f"{cf.ns.juntar_com_e(ref['nds'])} (NC)" if ref and ref["nds"] else "sem NC anterior",
-            bool(ref and ref["nds"]), cf.ns.juntar_com_e(ref["nds"]) if ref and ref["nds"] else ""),
-        "PI": (
-            f"{cf.ns.juntar_com_e(ref['pis'])} (NC)" if ref and ref["pis"] else "sem NC anterior",
-            bool(ref and ref["pis"]), cf.ns.juntar_com_e(ref["pis"]) if ref and ref["pis"] else ""),
-        "Valor": (f"{ref['valor']} (NC)" if ref and ref["valor"] else "sem NC anterior",
-                  bool(ref and ref["valor"]), ref["valor"] if ref else ""),
-        "CLAS.ORC": (
-            f"{cf.ns.juntar_com_e(ref['clas_orc'])} (Dotação)" if ref and ref["clas_orc"] else "sem subelemento na Dotação",
-            bool(ref and ref["clas_orc"]), cf.ns.juntar_com_e(ref["clas_orc"]) if ref and ref["clas_orc"] else ""),
-    }
+    # campos orçamentários: RO da NC x Dotação Orçamentária x RO da NE lado a lado, 1 coluna por
+    # documento - nenhum dos 3 é tratado como "fonte segura" dos outros (ver _CAMPOS_ORCAMENTARIOS_RO)
+    linhas_orc = []
+    for campo in _CAMPOS_ORCAMENTARIOS_RO:
+        rotulos = _CAMPOS_CONSISTENCIA_RO[campo]
+        por_doc = _valores_por_documento_ro(campo, rotulos, blocos)
 
-    linhas = []
-    for campo, rotulos in _CAMPOS_CONSISTENCIA_RO.items():
-        ocorrencias = []
-        for bloco in blocos:
-            for linha in bloco["linhas"]:
-                if linha["campo"] in rotulos and linha["documento_disponivel"]:
-                    valor = linha["documento"]
-                    if campo == "Valor":
-                        valor = _valor_consistencia(valor)
-                    ocorrencias.append((_nome_curto_documento_ro(bloco["documento"]), valor))
-
-        if not ocorrencias:
-            continue
-
-        fonte_texto, fonte_disp, fonte_valor = fontes[campo]
-        comparador = _COMPARADOR_CONSISTENCIA_RO[campo]
-        if fonte_valor:
-            bate = all(comparador(fonte_valor, valor) for _, valor in ocorrencias)
-        elif len(ocorrencias) >= 2:
-            referencia = ocorrencias[0][1]
-            bate = all(comparador(referencia, valor) for _, valor in ocorrencias)
+        nc_texto = _valor_referencia(ref, _ORC_CAMPO_PARA_CHAVE_REF[campo])
+        dotacao_valores = list(dict.fromkeys(por_doc.get("Dotação", [])))
+        if not dotacao_valores and campo in _ORC_DOTACAO_VIA_REF:
+            dotacao_texto = _valor_referencia(ref, _ORC_DOTACAO_VIA_REF[campo])
         else:
-            continue  # 1 documento e sem fonte segura - nada a confrontar (ja aparece no bloco do proprio documento)
+            dotacao_texto = cf.ns.juntar_com_e(dotacao_valores) if dotacao_valores else ""
+        rone_valores = list(dict.fromkeys(por_doc.get("RO da NE", [])))
+        rone_texto = cf.ns.juntar_com_e(rone_valores) if rone_valores else ""
 
-        # bate -> mostra so o valor (ja e o mesmo em todos); nao bate -> discrimina por documento
-        doc_texto = ocorrencias[0][1] if bate else " | ".join(f"{nome}: {valor}" for nome, valor in ocorrencias)
-        linhas.append(cf.linha_tabela(campo, fonte_texto, fonte_disp, doc_texto, True, bate))
+        valores_colunas = [
+            (nc_texto, bool(nc_texto)), (dotacao_texto, bool(dotacao_texto)), (rone_texto, bool(rone_texto)),
+        ]
+        disponiveis = [texto for texto, disp in valores_colunas if disp]
+        if len(disponiveis) < 2:
+            continue  # só 1 documento trouxe o campo - nada a confrontar (já aparece no bloco do próprio documento)
 
-    if not linhas:
-        return None
-    return cf.montar_tabela(nome_arquivo, "Consistência entre Documentos", None, linhas)
+        comparador = _COMPARADOR_CONSISTENCIA_RO[campo]
+        bate = all(comparador(disponiveis[0], v) for v in disponiveis[1:])
+        linhas_orc.append(cf.linha_tabela_multi(campo, valores_colunas, bate))
+
+    blocos_consistencia = []
+    if linhas_orc:
+        blocos_consistencia.append(cf.montar_tabela(
+            nome_arquivo, "Consistência Orçamentária entre Documentos", None, linhas_orc,
+            colunas=_COLUNAS_ORCAMENTARIAS_RO, observacao=nota_solicitacao,
+        ))
+    return blocos_consistencia
 
 
 # ======= ponto de entrada =======
@@ -621,17 +863,18 @@ def gerar_conformidade_ro(nome_arquivo, paginas):
     m_processo = RE_PROCESSO.search(paginas[0])
     processo_p1 = m_processo.group() if m_processo else None
 
-    solic_blocos, referencias = processar_solicitacao_empenho(nome_arquivo, paginas, contrato, corte)
+    req_blocos, requerimentos = processar_requerimento_empenho(nome_arquivo, paginas, contrato, corte)
+    solic_blocos, referencias = processar_solicitacao_empenho(nome_arquivo, paginas, contrato, requerimentos, processo_p1, corte)
     dot_blocos = processar_dotacao_orcamentaria(nome_arquivo, paginas, processo_p1, referencias, corte)
-    rone_blocos, nes = processar_ro_da_ne(nome_arquivo, paginas, contrato, referencias, corte)
+    rone_blocos, nes = processar_ro_da_ne(nome_arquivo, paginas, contrato, referencias, corte, processo_p1)
 
     # exibe na ordem em que os documentos aparecem no processo
-    blocos = sorted(solic_blocos + dot_blocos + rone_blocos, key=lambda bloco: bloco["pagina"])
+    blocos = sorted(req_blocos + solic_blocos + dot_blocos + rone_blocos, key=lambda bloco: bloco["pagina"])
 
-    # confronta a mesma informacao entre os documentos - sempre por ultimo (bloco sem pagina)
-    consistencia = processar_consistencia_documentos_ro(nome_arquivo, blocos, referencias, contrato, processo_p1)
-    if consistencia:
-        blocos.append(consistencia)
+    # confronta a mesma informacao entre os documentos - sempre por ultimo (blocos sem pagina)
+    nota_solicitacao = _nota_solicitacao_servico(paginas, corte)
+    blocos_consistencia = processar_consistencia_documentos_ro(nome_arquivo, blocos, referencias, nota_solicitacao)
+    blocos.extend(blocos_consistencia)
 
     # "toda conferencia bater" = pelo menos um documento conferido e TODA linha "ok"
     # (nenhuma divergencia e nenhum campo que nao deu pra comparar)
@@ -643,8 +886,9 @@ def gerar_conformidade_ro(nome_arquivo, paginas):
 
 
 def rodar_conferencia_ro():
-    # usado tanto pelo main()/CLI quanto pela janela - devolve (blocos, aviso, resumos):
-    # blocos = todos os documentos conferidos; resumos = um por PDF valido, pra pintar a planilha
+    # usado tanto pelo main()/CLI quanto pela janela - devolve (blocos, aviso, resumos, num_pdfs):
+    # blocos = todos os documentos conferidos; resumos = um por PDF valido, pra pintar a planilha;
+    # num_pdfs = quantos PDFs a coleta encontrou (Chrome + abertos + caixa de diálogo), pro print
     contratos_db.inicializar_db()
     fontes, aviso = cf.coletar_fontes_pdf()
     blocos, resumos = [], []
@@ -653,7 +897,7 @@ def rodar_conferencia_ro():
         blocos.extend(blocos_pdf)
         if resumo:
             resumos.append(resumo)
-    return blocos, aviso, resumos
+    return blocos, aviso, resumos, len(fontes)
 
 
 def pintar_empenhos_aprovados(nome_planilha, resumos):
@@ -718,14 +962,9 @@ def abrir_janela(blocos, aviso):
 def main(nome_planilha=None):
     # roda pelo card "Fazer Conformidade (RO)" do gui.py (background thread) - ao terminar,
     # abre a janela de resultado automaticamente, mesmo padrao da conformidade.py
-    blocos, aviso, resumos = rodar_conferencia_ro()
-    if aviso:
-        print(aviso)
-    print("Resultado da Conformidade (RO):")
-    if not blocos:
-        print("Nenhum documento para conferencia encontrado nos PDFs disponiveis.")
-    else:
-        print(f"{len(blocos)} documento(s) conferido(s) - Abrindo janela com o resultado...")
+    blocos, aviso, resumos, num_pdfs = rodar_conferencia_ro()
+    print(f"PDFs baixados e abertos encontrados: {num_pdfs}")
+    print("Abrindo janela com o resultado...")
 
     # pinta a celula do empenho na Planilha de Controle pros processos 100% conferidos
     # (so quando rodando pelo gui.py, que passa a planilha escolhida)

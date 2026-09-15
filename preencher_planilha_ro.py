@@ -16,9 +16,12 @@ RE_PROCESSO = re.compile(r"\d{5}\.\d{6}\.\d{4}-\d{2}")
 RE_TIPO_SOLIC_EMPENHO = re.compile(r"Solicita[çc][ãa]o\s+de\s+empenho", re.IGNORECASE)
 # marco que fecha um ciclo de empenho: o "Despacho: Sem ocorrência" da conformidade OU o
 # "Certificado de Conformidade Sem Ocorrência" (alguns processos trazem o certificado no lugar
-# do despacho) - o recorte da etapa mais recente começa depois da ÚLTIMA ocorrência de qualquer um
+# do despacho) - o recorte da etapa mais recente começa depois da ÚLTIMA ocorrência de qualquer um.
+# O despacho às vezes vem com o setor entre colchetes antes ("[COFCCI] - Sem ocorrência."), que
+# esse "\[.+?\]\s*-\s*" opcional cobre - mesmo fix do conformidade_ro.py, 2026-09-15
 RE_MARCO_SEM_OCORRENCIA = re.compile(
-    r"(?:Despacho:\s*|Certificado\s+de\s+Conformidade\s+)Sem\s+ocorr[êe]ncia", re.IGNORECASE
+    r"(?:Despacho:\s*(?:\[.+?\]\s*-\s*)?|Certificado\s+de\s+Conformidade\s+)Sem\s+ocorr[êe]ncia",
+    re.IGNORECASE
 )
 RE_NUMERO_RO = re.compile(r"NUMERO\s*:\s*(2026RO\d+)")
 RE_DOCUMENTO_NC = re.compile(r"DOCUMENTO WEB\s*:\s*(2026NC\d+)")
@@ -341,13 +344,15 @@ def main(nome_planilha=None):
         navegador.switch_to.window(aba_original)
 
     # ------- Além das abas do Chrome, também processa PDFs baixados/abertos localmente no
-    # computador - combina duas fontes: janelas/abas em primeiro plano de qualquer visualizador
-    # (listar_pdfs_abertos) e PDFs baixados recentemente na pasta Downloads (listar_pdfs_recentes,
-    # que existe porque visualizadores com abas dentro de uma única janela, como o Foxit, escondem
-    # da detecção por janela qualquer aba que não esteja em primeiro plano).
-    caminhos_pdf = list(dict.fromkeys(
-        pdf_aberto_windows.listar_pdfs_abertos() + pdf_aberto_windows.listar_pdfs_recentes()
-    ))
+    # computador - primeiro tenta achar sozinho (listar_pdfs_abertos: janelas/abas em primeiro
+    # plano de qualquer visualizador, pra visualizadores com abas dentro de uma única janela, como
+    # o Foxit, que escondem da detecção por janela qualquer aba que não esteja em primeiro plano);
+    # só abre a caixa de diálogo do Explorer (selecionar_pdfs_dialogo) pra escolher na mão se essa
+    # busca automática não achou nada - pedido do usuário 2026-09-14, pra não incomodar toda vez
+    # que já tem PDF aberto (a detecção automática por data de modificação em Downloads/Desktop/
+    # Documents, que existia antes da caixa de diálogo, foi removida no mesmo pedido por pegar PDF
+    # errado sem avisar).
+    caminhos_pdf = pdf_aberto_windows.listar_pdfs_abertos() or pdf_aberto_windows.selecionar_pdfs_dialogo()
     for caminho_pdf in caminhos_pdf:
         with open(caminho_pdf, "rb") as arquivo:
             linhas_extraidas = extrair_dados(arquivo)

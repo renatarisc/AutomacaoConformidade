@@ -66,6 +66,26 @@ def listar_pdfs_abertos():
             caminhos.append(caminho)
     return caminhos
 
+def selecionar_pdfs_dialogo():
+    # abre a caixa de diálogo nativa do Windows (Explorer) pra escolher, na mão, um ou mais PDFs -
+    # substitui a antiga detecção automática de "baixados recentemente" (listar_pdfs_recentes,
+    # removida a pedido do usuário 2026-09-14: varrer Downloads/Desktop/Documents por data de
+    # modificação pegava PDF errado sem o usuário perceber). tkinter é biblioteca padrão do
+    # Python (não precisa instalar nada extra) e o askopenfilenames já é o diálogo nativo do
+    # Explorer. Lista vazia se o usuário cancelar o diálogo.
+    import tkinter as tk
+    from tkinter import filedialog
+
+    raiz = tk.Tk()
+    raiz.withdraw() # não mostra a janela principal do Tkinter, só o diálogo
+    raiz.attributes("-topmost", True) # traz o diálogo pra frente de qualquer outra janela
+    caminhos = filedialog.askopenfilenames(
+        title="Selecione o(s) PDF(s)",
+        filetypes=[("Arquivos PDF", "*.pdf")],
+    )
+    raiz.destroy()
+    return list(caminhos)
+
 DIAS_RECENTES_PADRAO = 7
 LIMITE_ARQUIVOS_PADRAO = 50
 

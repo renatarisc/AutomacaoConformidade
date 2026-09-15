@@ -55,10 +55,29 @@ def eh_diaria(conteudo):
     # ("DOC GERADO PELO SCDP" / "PCDP nnnnnn/nn" na OBSERVACAO)
     return "SCDP" in conteudo
 
+def variante_valor_com_milhar(valor):
+    # a planilha às vezes guarda o valor sem separador de milhar (ex: "1372,33"), mas o CONOB do
+    # Siafi sempre imprime com ele ("1.372,33") - aceita as duas formas na busca por substring
+    # (diagnosticado ao vivo: 2026OB000507, valor "1372,33" na planilha x "1.372,33" no PDF)
+    if "," not in valor:
+        return valor
+    parte_inteira, parte_decimal = valor.split(",", 1)
+    sinal, parte_inteira = ("-", parte_inteira[1:]) if parte_inteira.startswith("-") else ("", parte_inteira)
+    if "." in parte_inteira or len(parte_inteira) <= 3:
+        return valor
+    grupos = []
+    while len(parte_inteira) > 3:
+        grupos.insert(0, parte_inteira[-3:])
+        parte_inteira = parte_inteira[:-3]
+    grupos.insert(0, parte_inteira)
+    return f"{sinal}{'.'.join(grupos)},{parte_decimal}"
+
 def pdf_contem(caminho_pdf, ob, valor, processo):
     leitor = PdfReader(str(caminho_pdf))
     conteudo = "\n".join(pagina.extract_text() or "" for pagina in leitor.pages)
-    if ob not in conteudo or valor not in conteudo:
+    if ob not in conteudo:
+        return False
+    if valor not in conteudo and variante_valor_com_milhar(valor) not in conteudo:
         return False
     # exceção p/ OB de diária: a CONOB dela não traz processo nenhum (e na planilha o processo
     # costuma estar numa célula mesclada, que só devolve valor na 1ª linha do merge), então o

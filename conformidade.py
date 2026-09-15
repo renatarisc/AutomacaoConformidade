@@ -80,7 +80,13 @@ def comparar_textos(a, b):
     na, nb = normalizar(a), normalizar(b)
     if not na or not nb:
         return False
-    return na == nb or na.startswith(nb) or nb.startswith(na)
+    if na == nb or na.startswith(nb) or nb.startswith(na):
+        return True
+    # telas SIAFI de largura fixa quebram linha no meio de uma palavra (a extração vira "EMPREENDIM
+    # ENTOS" em vez de "EMPREENDIMENTOS") - tira todo espaço dos dois lados e compara de novo, pra
+    # não deixar essa quebra arbitrária derrubar uma comparação que seria idêntica
+    sa, sb = na.replace(" ", ""), nb.replace(" ", "")
+    return bool(sa) and (sa == sb or sa.startswith(sb) or sb.startswith(sa))
 
 # ------- meses / competência / período -------
 
@@ -513,13 +519,29 @@ def linha_tabela(campo, fonte_texto, fonte_disponivel, doc_texto, doc_disponivel
         "resultado": "ok" if bate is True else ("nao" if bate is False else "indefinido"),
     }
 
-def montar_tabela(nome_arquivo, nome_documento, pagina, linhas, observacao=None):
+def linha_tabela_multi(campo, valores, bate):
+    # variante de linha_tabela pra tabela de N colunas (1 por documento, em vez de fonte segura x
+    # documento) - valores é uma lista de (texto, disponivel), na mesma ordem das colunas do bloco
+    # (ver montar_tabela colunas=). Usada pela consistência orçamentária do conformidade_ro.py
+    # (RO da NC x Dotação Orçamentária x RO da NE), onde os 3 documentos têm o mesmo "peso" - não
+    # faz sentido tratar um deles como "fonte segura" dos outros dois.
+    return {
+        "campo": campo,
+        "valores": [{"texto": texto, "disponivel": bool(disponivel)} for texto, disponivel in valores],
+        "resultado": "ok" if bate is True else ("nao" if bate is False else "indefinido"),
+    }
+
+def montar_tabela(nome_arquivo, nome_documento, pagina, linhas, observacao=None, colunas=None):
     # observacao: nota de destaque (vermelha na janela HTML) mostrada no fim do bloco, pra campo
     # que o próprio documento determina e não tem fonte segura pra conferir contra (ex: Competência
     # e Valor do Termo Circunstanciado - ver processar_termo_circunstanciado)
+    # colunas: títulos das colunas de valor quando linhas vêm de linha_tabela_multi (em vez do par
+    # fixo Fonte segura/Documento) - None mantém o formato padrão de 2 colunas
     bloco = {"arquivo": nome_arquivo, "documento": nome_documento, "pagina": pagina, "linhas": linhas}
     if observacao:
         bloco["observacao"] = observacao
+    if colunas:
+        bloco["colunas"] = list(colunas)
     return bloco
 
 def formatar_bloco_markdown(bloco):
@@ -3115,9 +3137,10 @@ def _abrir_leitor(arquivo_ou_stream, nome_exibicao):
         return None
 
 def coletar_fontes_pdf():
-    # mesma dupla fonte que preencher_planilha_ro.py/ns.py usam: abas do Chrome (se disponível) +
-    # PDFs abertos/baixados localmente - devolve [(nome_exibicao, [texto_por_pagina, ...]), ...],
-    # junto com um aviso (string ou None) se o Chrome não estava disponível
+    # abas do Chrome (se disponível) + PDFs abertos localmente (listar_pdfs_abertos) + PDFs
+    # escolhidos na mão pelo usuário na caixa de diálogo do Explorer (selecionar_pdfs_dialogo) -
+    # devolve [(nome_exibicao, [texto_por_pagina, ...]), ...], junto com um aviso (string ou None)
+    # se o Chrome não estava disponível
     aviso = None
     try:
         options = webdriver.ChromeOptions()
@@ -3142,9 +3165,9 @@ def coletar_fontes_pdf():
             fontes.append((url, [_extrair_texto_pagina(p) for p in leitor.pages]))
         navegador.switch_to.window(aba_original)
 
-    caminhos_pdf = list(dict.fromkeys(
-        pdf_aberto_windows.listar_pdfs_abertos() + pdf_aberto_windows.listar_pdfs_recentes()
-    ))
+    # so abre a caixa de dialogo (selecionar_pdfs_dialogo) se listar_pdfs_abertos nao achou nada -
+    # pedido do usuario 2026-09-14, pra nao incomodar toda vez que ja tem PDF aberto
+    caminhos_pdf = pdf_aberto_windows.listar_pdfs_abertos() or pdf_aberto_windows.selecionar_pdfs_dialogo()
     for caminho in caminhos_pdf:
         with open(caminho, "rb") as arquivo:
             leitor = _abrir_leitor(arquivo, caminho)
@@ -3214,7 +3237,6 @@ HTML_CONFORMIDADE = r"""
 
   .cabecalho { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
   h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
-  .subtitulo { margin: 2px 0 0; color: var(--ink-soft); font-size: 12.5px; }
 
   .marca-icone {
     width: 34px; height: 34px; border-radius: 8px;
@@ -3224,13 +3246,6 @@ HTML_CONFORMIDADE = r"""
     box-shadow: var(--shadow-1); flex: 0 0 auto;
   }
   .marca-icone svg { width: 19px; height: 19px; }
-
-  .aviso {
-    display: flex; align-items: center; gap: 8px;
-    background: var(--status-error-tint); border: 1px solid #f3c9c6; color: var(--status-error);
-    border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin-bottom: 14px;
-  }
-  .aviso svg { flex: 0 0 auto; }
 
   .vazio { padding: 26px; text-align: center; color: var(--ink-faint); }
 
@@ -3279,7 +3294,6 @@ HTML_CONFORMIDADE = r"""
     <div class="marca-icone"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></div>
     <div>
       <h1>Resultado da Conformidade</h1>
-      <p class="subtitulo">Documentos preenchidos x Fontes seguras (BD, Termo Gestor e NF).</p>
     </div>
   </div>
   <div id="conteudo"></div>
@@ -3287,7 +3301,6 @@ HTML_CONFORMIDADE = r"""
 
 <script>
   const ICONE_ARQUIVO = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v4h4"/></svg>';
-  const ICONE_AVISO = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><circle cx="12" cy="16.5" r="0.5" fill="currentColor"/><path d="M10.3 4.6 2.9 18a1.5 1.5 0 0 0 1.3 2.2h15.6a1.5 1.5 0 0 0 1.3-2.2L13.7 4.6a1.6 1.6 0 0 0-2.8 0Z"/></svg>';
   const BADGES = {
     ok: '<span class="badge badge--ok" title="Confere"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></span>',
     nao: '<span class="badge badge--nao" title="Não confere"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></span>',
@@ -3308,6 +3321,24 @@ HTML_CONFORMIDADE = r"""
     s.className = "valor--calc";
     s.textContent = " - " + texto;
     return s.outerHTML;
+  }
+
+  function montarTabelaLinhasMulti(colunas, linhas) {
+    // 1 coluna por documento (em vez de Fonte segura/Documento) - cada linha.valores está na
+    // mesma ordem de `colunas`; nenhum dos documentos é tratado como "fonte segura" dos outros
+    const corpo = linhas.map((linha) => `
+      <tr class="${linha.destaque ? "linha--destaque" : ""}">
+        <td class="campo">${linha.campo}</td>
+        ${linha.valores.map((v) => `<td>${celulaValor(v.texto, v.disponivel, linha.resultado === "nao")}</td>`).join("")}
+        <td class="resultado">${BADGES[linha.resultado]}</td>
+      </tr>
+    `).join("");
+    return `
+      <table>
+        <thead><tr><th>Campo</th>${colunas.map((c) => `<th>${c}</th>`).join("")}<th>Resultado</th></tr></thead>
+        <tbody>${corpo}</tbody>
+      </table>
+    `;
   }
 
   function montarTabelaLinhas(linhas) {
@@ -3331,7 +3362,9 @@ HTML_CONFORMIDADE = r"""
   function montarPainelDocumento(bloco) {
     const pagina = bloco.pagina ? `<span class="pagina-doc">pág. ${bloco.pagina}</span>` : "";
     const sigla = bloco.sigla ? `<span class="sigla-doc">(${bloco.sigla})</span>` : "";
-    const tabela = bloco.linhas.length ? montarTabelaLinhas(bloco.linhas) : "";
+    const tabela = bloco.linhas.length
+      ? (bloco.colunas ? montarTabelaLinhasMulti(bloco.colunas, bloco.linhas) : montarTabelaLinhas(bloco.linhas))
+      : "";
     // sem tabela (documento não localizado), a observação vira o conteúdo do painel - tira o
     // divisor/respiro que ela ganha quando vem logo abaixo de uma tabela
     const classeObs = tabela ? "observacao" : "observacao observacao--solta";
@@ -3357,10 +3390,6 @@ HTML_CONFORMIDADE = r"""
   function renderizar(resultado) {
     const alvo = document.getElementById("conteudo");
     let html = "";
-
-    if (resultado.aviso) {
-      html += `<div class="aviso">${ICONE_AVISO}${resultado.aviso}</div>`;
-    }
 
     if (!resultado.blocos.length) {
       html += '<p class="vazio">Nenhum documento de conformidade encontrado nos PDFs disponíveis.</p>';

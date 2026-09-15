@@ -49,7 +49,7 @@ OPCOES = [
         "icone": ICONE_DOCUMENTO,
         "titulo": "Preencher Planilha de Controle (RO)",
         "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
-        "requisito": "Requer o Chrome já aberto em modo debug, com as abas dos processos em PDF.",
+        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; também abre PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
     },
     {
         "arquivo": "conformidade_ro.py",
@@ -58,7 +58,7 @@ OPCOES = [
         "icone": ICONE_CONFERENCIA,
         "titulo": "Fazer Conformidade (RO)",
         "descricao": "Cara-Crachá: Documentos preenchidos x Fontes seguras.",
-        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; senão, PDFs baixados.",
+        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; também abre PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
     },
     {
         "arquivo": "preencher_planilha_ns.py",
@@ -67,7 +67,7 @@ OPCOES = [
         "icone": ICONE_DOCUMENTO,
         "titulo": "Preencher Planilha de Controle (NS)",
         "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
-        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; senão, PDFs baixados.",
+        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; também abre PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
     },
     {
         "arquivo": "conformidade.py",
@@ -76,7 +76,7 @@ OPCOES = [
         "icone": ICONE_CONFERENCIA,
         "titulo": "Fazer Conformidade (NS)",
         "descricao": "Cara-Crachá: Documentos preenchidos x Fontes seguras (BD, Termo Gestor e NF).",
-        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; senão, PDFs baixados.",
+        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; também abre PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
     },
     {
         "arquivo": "baixar_anexar_ne.py",
