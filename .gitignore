@@ -5,6 +5,8 @@ credenciais.json
 credenciais_suap.json
 contratos.db
 contratos_backups/
+bolsas.db
+bolsas_backups/
 build/
 dist/
 *.spec

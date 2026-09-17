@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import subprocess
 import threading
 import traceback
 
@@ -16,12 +17,17 @@ import baixar_anexar_ne
 import preencher_planilha_ro
 import preencher_planilha_ns
 import cadastrar_contrato
+import cadastrar_bolsa
 import conformidade
 import conformidade_ro
 
 # comando que abre o Chrome em modo de depuração remota (porta 9222), exigido pelos
 # scripts que se conectam via options.debugger_address - ver comentário no topo de cada main()
 COMANDO_CHROME_DEBUG = r'"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\ChromeSelenium"'
+# mesmo comando acima, como lista de argumentos - usado pelo botão "Abrir" (Popen sem shell=True,
+# não depende das regras de quoting do cmd.exe nem herda o risco de injeção do shell=True)
+CAMINHO_CHROME_DEBUG = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+ARGS_CHROME_DEBUG = ["--remote-debugging-port=9222", r"--user-data-dir=C:\ChromeSelenium"]
 
 # ícones de cada card em SVG inline (estilo flat/outline, no espírito do Flaticon) em vez de
 # emoji - não usamos ícones hotlinkados do Flaticon de fato porque isso exigiria internet em
@@ -49,7 +55,7 @@ OPCOES = [
         "icone": ICONE_DOCUMENTO,
         "titulo": "Preencher Planilha de Controle (RO)",
         "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
-        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; também abre PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
+        "requisito": "Usa os PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
     },
     {
         "arquivo": "conformidade_ro.py",
@@ -58,7 +64,7 @@ OPCOES = [
         "icone": ICONE_CONFERENCIA,
         "titulo": "Fazer Conformidade (RO)",
         "descricao": "Cara-Crachá: Documentos preenchidos x Fontes seguras.",
-        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; também abre PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
+        "requisito": "Usa os PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
     },
     {
         "arquivo": "preencher_planilha_ns.py",
@@ -67,7 +73,7 @@ OPCOES = [
         "icone": ICONE_DOCUMENTO,
         "titulo": "Preencher Planilha de Controle (NS)",
         "descricao": "Lê as abas do Chrome com os Processos abertos em PDF e preenche a Planilha.",
-        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; também abre PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
+        "requisito": "Usa os PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
     },
     {
         "arquivo": "conformidade.py",
@@ -76,7 +82,7 @@ OPCOES = [
         "icone": ICONE_CONFERENCIA,
         "titulo": "Fazer Conformidade (NS)",
         "descricao": "Cara-Crachá: Documentos preenchidos x Fontes seguras (BD, Termo Gestor e NF).",
-        "requisito": "Usa os PDFs no Chrome em modo debug se disponível; também abre PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
+        "requisito": "Usa os PDFs já abertos no Windows ou permite escolher na caixa de diálogo.",
     },
     {
         "arquivo": "baixar_anexar_ne.py",
@@ -157,10 +163,25 @@ class Api:
     def obter_comando_chrome(self):
         return COMANDO_CHROME_DEBUG
 
+    def abrir_chrome_debug(self):
+        # equivalente a colar COMANDO_CHROME_DEBUG no CMD - lista de argumentos em vez de
+        # shell=True, então não depende de ter um CMD/terminal disponível nem do quoting dele
+        try:
+            if not os.path.exists(CAMINHO_CHROME_DEBUG):
+                return {"ok": False, "erro": f"Chrome não encontrado em {CAMINHO_CHROME_DEBUG}"}
+            subprocess.Popen([CAMINHO_CHROME_DEBUG] + ARGS_CHROME_DEBUG)
+            return {"ok": True}
+        except OSError as e:
+            return {"ok": False, "erro": str(e)}
+
     def abrir_cadastro_contrato(self):
         # abre a tela de contratos numa janela própria (lista + formulário + banco local),
         # separada da engine de execução de scripts usada pelos cards
         cadastrar_contrato.abrir_janela()
+
+    def abrir_cadastro_bolsa(self):
+        # mesma ideia do cadastro de contrato, janela própria com seu próprio banco local
+        cadastrar_bolsa.abrir_janela()
 
     def listar_planilhas(self):
         # a Planilha de Controle muda todo mês, sem data certa - em vez de editar o nome fixo em
@@ -476,6 +497,7 @@ HTML_INTERFACE = r"""
         </div>
       </div>
       <button class="btn btn--acento" id="cadastrar-contrato" title="Cadastrar/Editar contrato">Cadastro de Contrato</button>
+      <button class="btn btn--acento" id="cadastrar-bolsa" title="Cadastrar/Editar bolsa">Cadastro de Bolsa</button>
     </div>
 
     <div class="painel painel--acento">
@@ -495,6 +517,7 @@ HTML_INTERFACE = r"""
       <p class="rotulo"><span class="ponto"></span>Comando para abrir o Chrome em modo debug</p>
       <div class="linha-controle">
         <input class="campo-comando" id="chrome-comando" readonly>
+        <button class="btn btn--outline" id="chrome-abrir">Abrir</button>
         <button class="btn btn--outline" id="chrome-copiar">Copiar</button>
       </div>
       <p class="ajuda">Feche todos os Chromes abertos. Clique em Abrir ou copie e cole no CMD antes de rodar a automação.</p>
@@ -561,6 +584,13 @@ HTML_INTERFACE = r"""
     await window.pywebview.api.executar(arquivo, planilhaEscolhida);
   }
 
+  async function abrirChromeDebug() {
+    const resultado = await window.pywebview.api.abrir_chrome_debug();
+    if (!resultado.ok) {
+      alert("Erro ao abrir o Chrome: " + resultado.erro);
+    }
+  }
+
   async function copiarComandoChrome() {
     const texto = document.getElementById("chrome-comando").value;
     try {
@@ -603,9 +633,11 @@ HTML_INTERFACE = r"""
 
   async function iniciar() {
     document.getElementById("chrome-comando").value = await window.pywebview.api.obter_comando_chrome();
+    document.getElementById("chrome-abrir").addEventListener("click", abrirChromeDebug);
     document.getElementById("chrome-copiar").addEventListener("click", copiarComandoChrome);
     document.getElementById("planilha-atualizar").addEventListener("click", carregarPlanilhas);
     document.getElementById("cadastrar-contrato").addEventListener("click", () => window.pywebview.api.abrir_cadastro_contrato());
+    document.getElementById("cadastrar-bolsa").addEventListener("click", () => window.pywebview.api.abrir_cadastro_bolsa());
 
     const opcoes = await window.pywebview.api.obter_opcoes();
     const coluna1 = document.getElementById("coluna1-cards");

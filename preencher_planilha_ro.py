@@ -130,10 +130,11 @@ def extrair_dados(arquivo_pdf):
         if RE_MARCO_SEM_OCORRENCIA.search(texto):
             pagina_marco = i # guarda a ÚLTIMA ocorrência (sobrescreve a cada match, na ordem do PDF)
 
-    if pagina_marco is None:
-        return None # não achou nenhum despacho/certificado "Sem Ocorrência" - não dá pra saber onde a solicitação mais recente começa
-
-    pagina_inicial = pagina_marco + 2 # +1 pra pular a página do próprio marco, +1 porque a lista é 0-based e a planilha quer a página em 1-based
+    # nenhum despacho/certificado "Sem Ocorrência" ainda -> é o 1º ciclo de empenho do processo
+    # (nenhum ciclo anterior foi fechado por conformidade ainda), então o documento inteiro É a
+    # solicitação mais recente - mesmo tratamento que conformidade_ro.py já dá a esse caso (lá a
+    # variável equivalente, "corte", começa em 0 em vez de None)
+    pagina_inicial = (pagina_marco + 2) if pagina_marco is not None else 1 # +1 pra pular a página do próprio marco, +1 porque a lista é 0-based e a planilha quer a página em 1-based
 
     # dentro do mesmo ciclo pode ter mais de uma rodada de RO da NC/NC e de RO da NE/NE (ex: reforços sucessivos
     # ainda não fechados por um novo despacho/certificado "Sem Ocorrência") - por isso coleta TODAS as ocorrências, na
