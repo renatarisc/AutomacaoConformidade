@@ -1540,7 +1540,12 @@ def _mesmos_digitos(a, b):
     # compara só os dígitos, ignorando pontuação (".", "/", "-", espaços) - usado onde a mesma
     # informação vem com formatação diferente entre o BD e o documento: nº de processo (BD
     # "23323.001485.2024-97" x doc ".../..."), agência/conta bancária ("69453-3" x "69.453-3"), etc.
-    return bool(a) and bool(b) and re.sub(r"\D", "", a) == re.sub(r"\D", "", b)
+    # o BD pode cadastrar mais de um processo válido pro mesmo contrato, separados por " ou " (ex:
+    # processo original + aditivo/apostilamento) - basta o documento bater com QUALQUER um deles.
+    if not a or not b:
+        return False
+    digitos_b = re.sub(r"\D", "", b)
+    return any(re.sub(r"\D", "", alternativa) == digitos_b for alternativa in a.split(" ou "))
 
 _CNPJ_IFF_RAIZ = "10779511"  # raiz do CNPJ do IFFluminense (contratante) - só pra separar do fornecedor
 
@@ -1593,10 +1598,29 @@ RE_OF_PROCESSO_CONTRATACAO = re.compile(r"\d{5}\.\d{6}/\d{4}-\d{2}")
 RE_OF_OBJETO = re.compile(
     r"Objeto:\s*\n(.+?)\n(?:Contrato n[ºo°]|2 - INFORMA|Powered by)", re.DOTALL | re.IGNORECASE)
 # o bloco "Empenhos:" termina na próxima seção - que varia por modelo de OF: "Locais de Execução",
-# "3 - ITENS DA AUTORIZAÇÃO" ou "3 - ALTERAÇÕES REALIZADAS" (visto no 1161.pdf). Genérico:
-# qualquer cabeçalho de seção numerada ("N - XXX") em início de linha, ou fim do texto
+# "3 - ITENS DA AUTORIZAÇÃO"/"3 - ALTERAÇÕES REALIZADAS" (visto no 1161.pdf) ou "Itens:" (modelo
+# "Visualizar" de página única, visto no 1316.pdf - ver RE_OF_VIS_* abaixo). Genérico: qualquer
+# cabeçalho de seção numerada ("N - XXX") em início de linha, ou fim do texto
 RE_OF_EMPENHOS_BLOCO = re.compile(
-    r"Empenhos:\s*(.*?)(?:\n\s*(?:Locais de Execu|\d+\s*-\s+\S)|\Z)", re.DOTALL | re.IGNORECASE)
+    r"Empenhos:\s*(.*?)(?:\n\s*(?:Locais de Execu|Itens:|\d+\s*-\s+\S)|\Z)", re.DOTALL | re.IGNORECASE)
+
+# 2026-09-21, 3º modelo de OF (1316.pdf): impressão da tela "Visualizar" do Suap - página única,
+# sem as seções numeradas do documento formal e sem campo "Objeto". Rótulos em "Rótulo: valor" (às
+# vezes quebrados em várias linhas antes do ":"). Detectada por "Vigência início:" (rótulo exclusivo
+# dessa tela - o documento formal usa "Vigência Inicial:") + a mesma "Ordem de Serviço /
+# Fornecimento" da detecção formal. A "Vigência início/fim" aqui é a janela de execução DESSA OF
+# específica, não a vigência do contrato (que no modelo formal é o que a linha "Vigência" compara
+# contra o BD) - por isso NÃO vira linha na tabela (mesma decisão já tomada pro usuário pra
+# assinatura/execução do modelo formal: "não precisa").
+RE_OF_VIS_NUMERO = re.compile(
+    r"N[úu]mero/Ano da\s+Ordem de\s+Servi[çc]o\s*/\s*Fornecimento:\s*(\d+/\d+)", re.IGNORECASE)
+RE_OF_VIS_CONTRATO = re.compile(r"Contrato:\s*(\d+/\d+)")
+RE_OF_VIS_FORNECEDOR = re.compile(r"Fornecedor:\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})\s*-\s*(.+)")
+RE_OF_VIS_SECAO_ITENS = re.compile(r"Itens:\s*(.*?)(?:\n\s*Locais de|\Z)", re.DOTALL | re.IGNORECASE)
+# última ocorrência: o resumo "Valor total: R$ X" numa linha só (a versão quebrada em várias
+# linhas, do item individual, não bate esse padrão por exigir "Valor total:" na mesma linha)
+RE_OF_VIS_VALOR_TOTAL = re.compile(r"Valor total:\s*R\$\s*([\d.,]+)", re.IGNORECASE)
+
 RE_OF_NUMERO_NE = re.compile(r"\d{4}NE\d{6}")
 RE_OF_VALOR_TOTAL = re.compile(r"Valor Total da presente Ordem.*?R\$\s*([\d.,]+)", re.DOTALL | re.IGNORECASE)
 RE_OF_EXECUCAO = re.compile(
@@ -1624,30 +1648,53 @@ def _split_desc_unidade(bruto):
     return (desc, unid) if desc else (d, "")
 
 def _localizar_ordem_fornecimento(paginas):
-    # a OF ocupa 3 páginas no PDF ("1/3".."3/3"): "1 - INFORMAÇÕES DO CONTRATO", "2 - INFORMAÇÕES DA
-    # ORDEM DE SERVIÇO" (+ itens + valor total) e complementares/autorização. Devolve (indice_da_1ª,
-    # texto_das_3_juntas) ou (None, None). Última ocorrência, caso a OF tenha sido refeita.
-    indices = [i for i, t in enumerate(paginas)
-               if "1 - INFORMAÇÕES DO CONTRATO" in t and "Ordem de Serviço / Fornecimento" in t]
-    if not indices:
-        return None, None
-    indice = indices[-1]
-    return indice, remover_duplicatas_consecutivas("\n".join(paginas[indice:indice + 3]))
+    # a OF pode vir em 2 modelos: o documento FORMAL de 3 páginas ("1/3".."3/3" - "1 - INFORMAÇÕES
+    # DO CONTRATO", "2 - INFORMAÇÕES DA ORDEM DE SERVIÇO" + itens + valor total, complementares) ou
+    # a impressão da tela "VISUALIZACAO" do Suap (página única, sem seções numeradas nem "Objeto" -
+    # ver RE_OF_VIS_* acima, 1316.pdf). Devolve (indice_da_1ª_página, texto, modelo) com modelo
+    # "formal"/"visualizacao", ou (None, None, None). Última ocorrência de cada modelo, caso a OF
+    # tenha sido refeita.
+    indices_formal = [i for i, t in enumerate(paginas)
+                       if "1 - INFORMAÇÕES DO CONTRATO" in t and "Ordem de Serviço / Fornecimento" in t]
+    if indices_formal:
+        indice = indices_formal[-1]
+        return indice, remover_duplicatas_consecutivas("\n".join(paginas[indice:indice + 3])), "formal"
+
+    indices_vis = [i for i, t in enumerate(paginas)
+                   if "Vigência início:" in t and "Ordem de Serviço / Fornecimento" in t]
+    if indices_vis:
+        indice = indices_vis[-1]
+        texto = remover_duplicatas_consecutivas(paginas[indice]).replace("ﬁ", "fi").replace("ﬂ", "fl")
+        return indice, texto, "visualizacao"
+
+    return None, None, None
 
 def obter_dados_of(paginas):
     # dados da OF que NÃO têm fonte segura no BD e que os próximos documentos do processo de
     # almoxarifado (NF, Termo de Recebimento, IC) vão conferir contra: nº da OF, valor total,
     # período de execução e a lista de itens autorizados (não exibida no bloco da OF, guardada aqui
     # pra uso posterior). None se a OF não está no processo.
-    indice, texto = _localizar_ordem_fornecimento(paginas)
+    indice, texto, modelo = _localizar_ordem_fornecimento(paginas)
     if texto is None:
         return None
 
-    m_num = RE_OF_NUMERO.search(texto)
-    m_valor = RE_OF_VALOR_TOTAL.search(texto)
-    m_exec = RE_OF_EXECUCAO.search(texto)
-    m_secao = RE_OF_SECAO_ITENS.search(texto)
-    itens_texto = m_secao.group(1).strip() if m_secao else ""
+    if modelo == "visualizacao":
+        m_num = RE_OF_VIS_NUMERO.search(texto)
+        m_secao = RE_OF_VIS_SECAO_ITENS.search(texto)
+        itens_texto = m_secao.group(1).strip() if m_secao else ""
+        valores_totais = RE_OF_VIS_VALOR_TOTAL.findall(texto)
+        valor_total = valores_totais[-1] if valores_totais else None
+        assinatura = execucao_inicio = execucao_fim = None
+    else:
+        m_num = RE_OF_NUMERO.search(texto)
+        m_valor = RE_OF_VALOR_TOTAL.search(texto)
+        valor_total = m_valor.group(1) if m_valor else None
+        m_exec = RE_OF_EXECUCAO.search(texto)
+        assinatura = m_exec.group(1) if m_exec else None
+        execucao_inicio = m_exec.group(2) if m_exec else None
+        execucao_fim = m_exec.group(3) if m_exec else None
+        m_secao = RE_OF_SECAO_ITENS.search(texto)
+        itens_texto = m_secao.group(1).strip() if m_secao else ""
 
     m_bloco_emp = RE_OF_EMPENHOS_BLOCO.search(texto)
     empenhos = []
@@ -1670,10 +1717,10 @@ def obter_dados_of(paginas):
     return {
         "pagina": indice + 1,
         "numero": m_num.group(1) if m_num else None,
-        "valor_total": m_valor.group(1) if m_valor else None,
-        "assinatura": m_exec.group(1) if m_exec else None,
-        "execucao_inicio": m_exec.group(2) if m_exec else None,
-        "execucao_fim": m_exec.group(3) if m_exec else None,
+        "valor_total": valor_total,
+        "assinatura": assinatura,
+        "execucao_inicio": execucao_inicio,
+        "execucao_fim": execucao_fim,
         "empenhos": empenhos,
         "itens_texto": itens_texto,   # seção 3 crua, fallback caso o parse de linha falhe num modelo diferente
         "itens": itens,
@@ -1746,16 +1793,62 @@ def _linhas_cabecalho_contrato(texto, contrato):
     ))
     return linhas
 
+def _linhas_cabecalho_of_visualizacao(texto, contrato):
+    # equivalente a _linhas_cabecalho_contrato, mas pro modelo "Visualizar" de página única (ver
+    # RE_OF_VIS_* acima) - só 4 linhas (Contrato, Fornecedor, CNPJ, Processo de contratação): esse
+    # modelo não traz "Objeto", e "Vigência" nele é a janela de execução da própria OF, não a
+    # vigência do contrato - não dá pra comparar contra o mesmo campo do BD, por isso não vira linha
+    # (mesma decisão já tomada pro usuário pra assinatura/execução do modelo formal).
+    linhas = []
+
+    m_contrato = RE_OF_VIS_CONTRATO.search(texto)
+    doc_contrato = m_contrato.group(1) if m_contrato else None
+    fonte_contrato = contrato["numero_contrato"] if contrato else None
+    linhas.append(linha_tabela(
+        "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
+        doc_contrato or "não encontrado no documento", bool(doc_contrato),
+        comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
+    ))
+
+    m_forn = RE_OF_VIS_FORNECEDOR.search(texto)
+    doc_cnpj = m_forn.group(1) if m_forn else None
+    doc_fornecedor = limpar_espacos(m_forn.group(2)) if m_forn else None
+
+    fonte_fornecedor = contrato["nome_contratada"] if contrato else None
+    linhas.append(linha_tabela(
+        "Fornecedor", f"{fonte_fornecedor} (BD)" if fonte_fornecedor else "contrato não encontrado no banco", bool(fonte_fornecedor),
+        doc_fornecedor or "não encontrado no documento", bool(doc_fornecedor),
+        comparar_textos(fonte_fornecedor, doc_fornecedor) if fonte_fornecedor and doc_fornecedor else None,
+    ))
+
+    fonte_cnpj_fmt = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
+    linhas.append(linha_tabela(
+        "CNPJ", f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt),
+        doc_cnpj or "não encontrado no documento", bool(doc_cnpj),
+        comparar_cnpjs(fonte_cnpj_fmt, doc_cnpj) if fonte_cnpj_fmt and doc_cnpj else None,
+    ))
+
+    m_proc = RE_OF_PROCESSO_CONTRATACAO.search(texto)
+    doc_proc = m_proc.group() if m_proc else None
+    fonte_proc = contrato["processo_contratacao"] if contrato else None
+    linhas.append(linha_tabela(
+        "Processo de contratação", f"{fonte_proc} (BD)" if fonte_proc else "contrato não encontrado no banco", bool(fonte_proc),
+        doc_proc or "não encontrado no documento", bool(doc_proc),
+        _mesmos_digitos(fonte_proc, doc_proc) if fonte_proc and doc_proc else None,
+    ))
+    return linhas
+
 def processar_ordem_fornecimento(nome_arquivo, paginas, contrato, dados_of):
     # Documento 1 do processo de pagamento de almoxarifado. Os itens da OF NÃO entram na tabela
     # deste bloco (ficam em dados_of["itens"], pra conferir nos documentos seguintes) - aqui só a
     # conferência do cabeçalho contra o BD + observação com nº da OF / valor total / execução.
-    indice, texto = _localizar_ordem_fornecimento(paginas)
+    indice, texto, modelo = _localizar_ordem_fornecimento(paginas)
     if texto is None:
         return None
     dados_of = dados_of or {}
 
-    linhas = _linhas_cabecalho_contrato(texto, contrato)
+    linhas = (_linhas_cabecalho_of_visualizacao(texto, contrato) if modelo == "visualizacao"
+              else _linhas_cabecalho_contrato(texto, contrato))
 
     # Nº da OF, Valor Total e Empenho(s) NÃO são conferidos aqui - são determinados pela própria OF
     # (não há fonte segura no BD pra eles) e viram observação em vermelho no fim do bloco. A OF é a
