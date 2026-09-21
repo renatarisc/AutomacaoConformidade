@@ -4,17 +4,30 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 from datetime import datetime
+
+def _pasta_base():
+    # com o app empacotado (PyInstaller --onefile), __file__ deste módulo aponta pra dentro da
+    # pasta temporária de extração (sys._MEIPASS) - uma pasta NOVA a cada execução do .exe,
+    # apagada quando ele fecha. Gravar o banco ali faz ele "esquecer" tudo toda vez que o .exe é
+    # fechado (parece sempre vazio) - em vez de reabrir o contratos.db de verdade. Em modo
+    # congelado, banco e backups precisam ficar ao lado do .exe de verdade (sys.executable), a
+    # mesma pasta onde credenciais.json já precisa ser copiado manualmente (ver
+    # [[project-menu-and-packaging]]) - não dentro do bundle temporário.
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 # banco nativo do Python (sqlite3, sem dependência externa) - volume de contratos é pequeno,
 # não justifica um servidor de banco de dados separado
-CAMINHO_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contratos.db")
+CAMINHO_DB = os.path.join(_pasta_base(), "contratos.db")
 
 # esquema de backup real: a cada abertura da tela e a cada gravação (criar/editar/excluir),
 # grava um snapshot completo (cópia binária do .db + CSV de cada tabela) numa pasta datada
 # dentro de PASTA_BACKUPS. Existe pra que um erro de programação, migração ou operação
 # manual nunca mais custe dado real - ver [[project-suap-ob-pipeline]]/histórico do projeto
-PASTA_BACKUPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contratos_backups")
+PASTA_BACKUPS = os.path.join(_pasta_base(), "contratos_backups")
 MAX_BACKUPS = 300  # válvula de segurança contra crescimento sem fim - cada snapshot é minúsculo
 
 _ESQUEMA_SQL = """

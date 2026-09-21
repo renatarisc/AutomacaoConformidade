@@ -1391,8 +1391,15 @@ _CAMPOS_CONSISTENCIA = {
 
 def _comparar_conjuntos(a, b):
     # "Empenhos" é uma lista separada por vírgula (pode ter mais de um) - compara os números em si,
-    # não a string inteira (ordem/espaçamento não deveriam importar)
-    return {v.strip() for v in a.split(",") if v.strip()} == {v.strip() for v in b.split(",") if v.strip()}
+    # não a string inteira (ordem/espaçamento não deveriam importar). `a` é a referência (fonte
+    # segura com TODOS os empenhos registrados no contrato, ou o 1º documento quando não há fonte
+    # segura) e `b` o que um documento específico cita - um documento raramente cita todos os
+    # empenhos registrados, só o(s) que de fato usou (mesmo raciocínio já usado em _linha_empenho
+    # pro almoxarifado), então o teste é de SUBCONJUNTO (b ⊆ a), não de igualdade - senão um
+    # documento que cita só 1 dos vários empenhos possíveis dava falso "não confere".
+    conjunto_a = {v.strip() for v in a.split(",") if v.strip()}
+    conjunto_b = {v.strip() for v in b.split(",") if v.strip()}
+    return bool(conjunto_b) and conjunto_b <= conjunto_a
 
 def _valores_monetarios_batem(a, b):
     # "Valor" comparado pelo número em si (centavos), tolerando formatos diferentes ("7.130,22" x

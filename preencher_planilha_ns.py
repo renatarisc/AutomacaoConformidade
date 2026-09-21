@@ -40,8 +40,14 @@ _MARCADORES_PAGINA_NF = (
 # acentos de "SERVIÇO"/"ELETRÔNICA" que o pypdf corrompe (\S? casa o caractere trocado, o "C" de
 # "SERVICO" sem acento, ou o acento intacto). Visto no 1250.pdf (modelo de Campos dos Goytacazes).
 # Exige o título em início de linha pra NÃO casar a linha "Tipo do Documento: Nota Fiscal de
-# Serviço Eletrônica (NFS-e)" da capa de digitalização do Suap (que não é a nota em si)
-RE_MARCADOR_NF = re.compile(r"(?:^|\n)NOTA FISCAL DE SERVI\S?OS? ELETR\S?NICA", re.IGNORECASE)
+# Serviço Eletrônica (NFS-e)" da capa de digitalização do Suap (que não é a nota em si).
+# 2026-09-21, modelo de Barueri (1214.pdf): ordem das palavras invertida - "NOTA FISCAL ELETRÔNICA
+# DE SERVIÇOS" (Eletrônica antes de Serviços), não "NOTA FISCAL DE SERVIÇOS ELETRÔNICA" - 2ª
+# alternativa cobre essa ordem também.
+RE_MARCADOR_NF = re.compile(
+    r"(?:^|\n)NOTA FISCAL DE SERVI\S?OS? ELETR\S?NICA"
+    r"|(?:^|\n)NOTA FISCAL ELETR\S?NICA DE SERVI\S?OS",
+    re.IGNORECASE)
 
 def localizar_texto_nf(paginas):
     # devolve (texto das páginas que SÃO a nota fiscal, concatenado; números dessas páginas,
