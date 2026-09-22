@@ -1980,11 +1980,17 @@ RE_DANFE_BANCO = re.compile(
     r"BANCO\s+(?:([A-Za-zÀ-Úà-ú]+)\s+)?(\d{3,4})\s+AG\.?\s*(\d+)\s+C/C\s*([\d.]+(?:-\d+)?)", re.IGNORECASE)
 # item da DANFE, dentro da seção "DADOS DOS PRODUTOS / SERVIÇOS": CÓDIGO DESCRIÇÃO(pode quebrar de
 # linha) NCM(6-8díg) O/CSOSN CFOP UN QUANT VALOR_UNIT VALOR_TOTAL 0,00 ... - código pode ter 1
-# dígito ("7") ou vir com zeros à esquerda ("000000056", até 9); UN até ~12 letras ("LITRO"). A
-# NCM (6-8 dígitos seguidos) é a âncora do fim da descrição. Alguns modelos (fsist) intercalam
-# linhas de tributo IBPT ("Voce pagou aproximadamente...") entre a descrição e a NCM - _limpar_descricao_item corta isso.
+# dígito ("7") ou vir com zeros à esquerda ("000000056", até 9), MAS também pode ser alfanumérico
+# com hífen/ponto ("1293-8X300", "BK250-COR", "1642A-25" - visto no 1340.pdf/AMBARLAB); UN até ~12
+# letras ("LITRO"). A NCM (6-8 dígitos seguidos) é a âncora do fim da descrição. Alguns modelos
+# (fsist) intercalam linhas de tributo IBPT ("Voce pagou aproximadamente...") entre a descrição e a
+# NCM - _limpar_descricao_item corta isso.
+# âncora \n obrigatória antes do código: sem isso, "00" dentro das colunas zeradas "0,00 0,00 0,00"
+# que terminam CADA item também batia como um "código" (mais permissivo = mais fácil de casar à
+# toa), arrastando a linha do item SEGUINTE inteira pra dentro da "descrição" do item errado e
+# zerando a extração quando há mais de 1 item.
 RE_DANFE_ITEM = re.compile(
-    r"\s*(\d{1,9})\s+(.+?)\s+\d{6,8}\s+\d{2,4}\s+\d{4}\s+([A-Za-zÀ-Úà-ú]{1,12})\s+"
+    r"\n([A-Za-z0-9][A-Za-z0-9./-]{0,19})\s+(.+?)\s+\d{6,8}\s+\d{2,4}\s+\d{4}\s+([A-Za-zÀ-Úà-ú]{1,12})\s+"
     r"([\d.]+,\d+)\s+([\d.]+,\d+)\s+([\d.]+,\d{2})\b", re.DOTALL)
 
 def _limpar_descricao_item(bruto):
@@ -2416,17 +2422,18 @@ def obter_dados_nf_almoxarifado(paginas):
         texto, re.DOTALL | re.IGNORECASE)
     secao = "\n".join(secoes) if secoes else texto
     itens = []
-    for chunk in re.split(r"(?=\n\d{1,9}\s+\D)", "\n" + secao):
-        m = RE_DANFE_ITEM.match(chunk)
-        if m:
-            itens.append({
-                "codigo": m.group(1),
-                "descricao": _limpar_descricao_item(m.group(2)),
-                "unidade": m.group(3),
-                "quantidade": m.group(4),
-                "valor_unitario": m.group(5),
-                "valor_total": m.group(6),
-            })
+    # RE_DANFE_ITEM já exige "\n" antes do código (ver comentário na definição) - dá pra rodar
+    # direto com finditer, sem precisar pré-fatiar por item (o "\n" inicial evita casar no meio de
+    # outro item por engano)
+    for m in RE_DANFE_ITEM.finditer("\n" + secao):
+        itens.append({
+            "codigo": m.group(1),
+            "descricao": _limpar_descricao_item(m.group(2)),
+            "unidade": m.group(3),
+            "quantidade": m.group(4),
+            "valor_unitario": m.group(5),
+            "valor_total": m.group(6),
+        })
     return {
         "pagina": indice + 1,
         "numero": _num_nf(m_num.group(1)) if m_num else None,
