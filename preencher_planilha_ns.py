@@ -111,9 +111,11 @@ RE_CONTRATO = re.compile(r"[Cc]ontrato\s*:?\s*n?[ºo°]?\s*(\d{1,4}/\d{4})", re.
 # processo que também tenha um campo "Data de Emissão" - ex: o Certificado de Conformidade) -
 # como o modelo da nota fiscal varia (a confirmar com o usuário caso apareça um formato muito
 # diferente do testado), o rótulo aceito é flexível ("Data de Emissão" ou "Data e Hora da
-# Emissão", com ou sem "da <documento>" na frente) - só o valor em si (dd/mm/aaaa) é capturado
+# Emissão", com ou sem "da <documento>" na frente) - só o valor em si (dd/mm/aaaa) é capturado.
+# o "d[ae]" entre "Data" e "Emissão" é opcional: o modelo de Barueri (1214.pdf) usa só "Data
+# Emissão Hora Emissão", sem "de"/"da" nenhum
 RE_DATA_EMISSAO = re.compile(
-    r"(?:Data\s+(?:e\s+Hora\s+)?d[ae]\s+emiss\D?o(?:\s+d[ae]\s+(\S+))?"
+    r"(?:Data\s+(?:e\s+Hora\s+)?(?:d[ae]\s+)?emiss\D?o(?:\s+d[ae]\s+(\S+))?"
     r"|Emiss\S?o\s+da\s+NFS-e)"  # rótulo do modelo de Campos dos Goytacazes ("Emissão da NFS-e")
     r"\D*?(\d{2}/\d{2}/\d{4})",
     re.IGNORECASE,
@@ -139,11 +141,19 @@ RE_PERIODO_REFERENCIA_NF = re.compile(
     r"Per\D?odo\s+de\s+refer\Dncia:\s*(\d{2})/(\d{2})/(\d{4})\s*a\s*(\d{2}/\d{2}/\d{4})",
     re.IGNORECASE,
 )
+# modelo de Barueri: "FATURA 3016556 - ITAPERUNA - PERIODO DE 01/07/2026 A 31/07/2026 - CONTRATO
+# 17/2023" (1214.pdf) - frase corrida dentro da "Discriminação dos Serviços", sem "de referência:".
+# Uma NF do mesmo prestador (1213.pdf) abrevia pra "PER. 01/07/2026 A 31/07/2026" - as duas formas
+# são aceitas
+RE_PERIODO_NF_BARUERI = re.compile(
+    r"(?:PER\S?ODO\s+DE|PER\.)\s*(\d{2})/(\d{2})/(\d{4})\s*A\s*(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
 
 def extrair_periodo_referencia_nf(texto_nf):
     # devolve o intervalo bruto ("06/07/2026 a 05/08/2026") pra exibir junto da competência
     # inferida, ou "" se a nota não traz esse campo
-    m = RE_PERIODO_REFERENCIA_NF.search(texto_nf)
+    m = RE_PERIODO_REFERENCIA_NF.search(texto_nf) or RE_PERIODO_NF_BARUERI.search(texto_nf)
     return f"{m.group(1)}/{m.group(2)}/{m.group(3)} a {m.group(4)}" if m else ""
 # número(s) do(s) empenho(s) vinculado(s) à nota fiscal, tirado da página do "Instrumento de
 # Cobrança" (contratos.gov.br) - fica na tabela "Empenhos:" (colunas Número/Subelemento/Valor),
@@ -205,8 +215,9 @@ def extrair_competencia_nf(texto_nf):
     match = RE_COMPETENCIA.search(texto_nf)
     if match:
         return f"{match.group(1)}/{match.group(2)}"
-    # sem mês escrito: usa o mês inicial do "Período de referência", quando a nota traz esse campo
-    m_periodo = RE_PERIODO_REFERENCIA_NF.search(texto_nf)
+    # sem mês escrito: usa o mês inicial do "Período de referência" (ou do "PERIODO DE ... A ..."
+    # solto do modelo Barueri), quando a nota traz um desses campos
+    m_periodo = RE_PERIODO_REFERENCIA_NF.search(texto_nf) or RE_PERIODO_NF_BARUERI.search(texto_nf)
     if m_periodo and 1 <= int(m_periodo.group(2)) <= 12:
         return f"{_MESES_PT[int(m_periodo.group(2))]}/{m_periodo.group(3)}"
     return ""

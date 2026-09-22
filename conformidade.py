@@ -208,6 +208,10 @@ RE_VALOR_LIQUIDO_NF = re.compile(r"Valor L\Dquido da NFS-e\s*\n?\s*R\$\s*([\d.,]
 # aparece na mesma linha do rótulo ("Valor Líquido 1.208,33"), sem "da NFS-e" e sem "R$"
 RE_VALOR_SERVICO_NF_CAMPOS = re.compile(r"Al\S?quota\s*\nISSQN\s*\n\s*([\d.]+,\d{2})", re.IGNORECASE)
 RE_VALOR_LIQUIDO_NF_CAMPOS = re.compile(r"Valor L\Squido\s+([\d.]+,\d{2})", re.IGNORECASE)
+# modelo de Barueri (1214.pdf): não tem rótulo "Valor do Serviço" - só "VALOR TOTAL DA NOTA" no
+# rodapé, que bate com o que os outros documentos do processo (Relatório Circunstanciado, Despacho,
+# Instrumento de Cobrança) já citam como valor dessa NF - confirmado no 1214.pdf
+RE_VALOR_SERVICO_NF_BARUERI = re.compile(r"VALOR TOTAL DA NOTA\s*\n?\s*([\d.,]+)", re.IGNORECASE)
 # ancorado em "Prestador do Serviço" - a NF também tem o CNPJ do tomador (o próprio IFFluminense)
 # logo depois, sob o mesmo rótulo "CNPJ / CPF / NIF", então não dá pra buscar o rótulo sozinho
 RE_CNPJ_PRESTADOR_NF = re.compile(
@@ -217,6 +221,12 @@ RE_CNPJ_PRESTADOR_NF = re.compile(
 # só mais adiante, então o .*? não-guloso pega o do prestador (o 1º)
 RE_CNPJ_PRESTADOR_NF_CAMPOS = re.compile(
     r"Prestador de Servi\S?o.*?CPF\s*/\s*CNPJ:\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})",
+    re.IGNORECASE | re.DOTALL)
+# modelo de Barueri: "Prestador de Serviços" (plural) + rótulo "CNPJ/CPF" (sem ":") - só 1
+# ocorrência desse rótulo na página inteira (o CNPJ do tomador vem sem rótulo, colado no nome dele),
+# então não precisa ancorar em nada além do próprio "Prestador de Serviços"
+RE_CNPJ_PRESTADOR_NF_BARUERI = re.compile(
+    r"Prestador de Servi\S?os.*?CNPJ\s*/\s*CPF\s+(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})",
     re.IGNORECASE | re.DOTALL)
 
 def _primeiro_grupo(*matches):
@@ -246,8 +256,10 @@ def obter_dados_nf(paginas):
     # junto da competência em todo bloco que a exibe (ver _fonte_nf)
     competencia_periodo = "" if ns.RE_COMPETENCIA.search(texto_nf) else ns.extrair_periodo_referencia_nf(texto_nf)
     numero = ns.extrair_numero_nf(texto_nf)
-    valor = _primeiro_grupo(RE_VALOR_SERVICO_NF.search(texto_nf), RE_VALOR_SERVICO_NF_CAMPOS.search(texto_nf))
-    cnpj = _primeiro_grupo(RE_CNPJ_PRESTADOR_NF.search(texto_nf), RE_CNPJ_PRESTADOR_NF_CAMPOS.search(texto_nf))
+    valor = _primeiro_grupo(RE_VALOR_SERVICO_NF.search(texto_nf), RE_VALOR_SERVICO_NF_CAMPOS.search(texto_nf),
+                             RE_VALOR_SERVICO_NF_BARUERI.search(texto_nf))
+    cnpj = _primeiro_grupo(RE_CNPJ_PRESTADOR_NF.search(texto_nf), RE_CNPJ_PRESTADOR_NF_CAMPOS.search(texto_nf),
+                            RE_CNPJ_PRESTADOR_NF_BARUERI.search(texto_nf))
     # DANFE (nota de MATERIAL, não de serviço) caindo no fluxo de serviço - acontece quando o
     # processo é de aquisição de material mas o fornecedor não está cadastrado no banco como
     # almoxarifado (sem isso não dá pra rotear certo - ver gerar_conformidade). Os regexes de NFS-e
@@ -1424,7 +1436,9 @@ _CAMPOS_CONSISTENCIA = {
     "Competência": ["Competência"],
     "Período": ["Período"],
     "Valor": ["Valor", "Valor Bruto", "Valor Faturado", "Valor Líquido"],
-    "Empenhos": ["Empenhos"],
+    # "Empenho" (singular) é o rótulo que a NS usa (via _linha_empenho, compartilhada com o
+    # almoxarifado) - "Empenhos" (plural) é o do Instrumento de Cobrança
+    "Empenhos": ["Empenhos", "Empenho"],
 }
 
 def _comparar_conjuntos(a, b):
@@ -2088,10 +2102,13 @@ def _somar_itens(itens):
 
 def _calcular_retencao(contrato, dados_nf):
     # memória de cálculo da retenção tributária sobre o valor da NF. Código DARF e alíquotas vêm do
-    # CADASTRO DO CONTRATO (aba Tributação); a base é o valor total da DANFE. Devolve dict com
+    # CADASTRO DO CONTRATO (aba Tributação); a base é o valor total da nota. Devolve dict com
     # base / itens [(rótulo, alíquota %, valor)] / retencao (total) / liquido / codigo_darf, ou None
     # quando não há contrato, não há valor da NF, ou nenhum tributo incide.
-    base = _valor_para_float((dados_nf or {}).get("valor_total"))
+    # "valor_total" é a chave do dados_nf de almoxarifado (obter_dados_nf_almoxarifado); "valor" é a
+    # do dados_nf de serviço (obter_dados_nf) - essa função atende os 2 fluxos (NS/DF do SIAFI são
+    # as mesmas telas nos dois).
+    base = _valor_para_float((dados_nf or {}).get("valor_total") or (dados_nf or {}).get("valor"))
     if not contrato or base is None:
         return None
 
@@ -2131,7 +2148,7 @@ def _texto_calculado_mc(ret, dados_nf, liquido=False):
     # do contrato)"; para o líquido: "Calculado: 45,25 — 48,06 − 2,81 (valor bruto − retenção)".
     if not ret:
         return None
-    bruto_br = (dados_nf or {}).get("valor_total")
+    bruto_br = (dados_nf or {}).get("valor_total") or (dados_nf or {}).get("valor")
     if liquido:
         return (f"Calculado: {_float_para_valor_br(ret['liquido'])} — "
                 f"{bruto_br} - {_float_para_valor_br(ret['retencao'])} (valor bruto - retenção)")
@@ -2964,7 +2981,13 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
     dados_nf = dados_nf or {}
     dados_capa = dados_capa or {}
     ret = _calcular_retencao(contrato, dados_nf)
-    bruto = _valor_para_float(dados_nf.get("valor_total"))
+    # "valor_total"/"pagina" (chaves do dados_nf de almoxarifado) ou "valor"/"paginas" (chaves do
+    # dados_nf de serviço, "paginas" é uma LISTA) - essa função atende os 2 fluxos, ver
+    # _calcular_retencao acima
+    valor_nf = dados_nf.get("valor_total") or dados_nf.get("valor")
+    bruto = _valor_para_float(valor_nf)
+    pagina_nf_desc = (f"NF pág. {dados_nf['pagina']}" if dados_nf.get("pagina")
+                       else pagina_nf_str(dados_nf) if dados_nf.get("paginas") else "NF")
     fonte_cnpj = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
     fonte_forn = contrato.get("nome_contratada") if contrato else None
 
@@ -2995,8 +3018,8 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
         # --- Valor: liquidação = bruto da NF; pagamento = líquido; retenção = retenção ---
         obs_calculado = None
         if papel == "liquidacao" and bruto is not None:
-            fonte_v = dados_nf.get("valor_total")
-            fonte_v_desc = f"NF pág. {dados_nf['pagina']}" if dados_nf.get("pagina") else "NF"
+            fonte_v = valor_nf
+            fonte_v_desc = pagina_nf_desc
         elif papel == "pagamento" and ret:
             fonte_v, fonte_v_desc = _float_para_valor_br(ret["liquido"]), "MC - Líquido"
             obs_calculado = _texto_calculado_mc(ret, dados_nf, liquido=True)
@@ -3111,10 +3134,14 @@ def processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, process
 
     m_nf = RE_SIAFI_NF.search(texto)
     doc_nf = m_nf.group(1) if m_nf else None
-    fonte_nf = dados_nf.get("numero")
+    # "numero"/"pagina" (chaves do dados_nf de almoxarifado) ou "nf"/"paginas" (chaves do dados_nf
+    # de serviço, "paginas" é uma LISTA) - essa função atende os 2 fluxos
+    fonte_nf = dados_nf.get("numero") or dados_nf.get("nf")
+    pagina_nf_desc = (f"NF pág. {dados_nf['pagina']}" if dados_nf.get("pagina")
+                       else pagina_nf_str(dados_nf) if dados_nf.get("paginas") else "NF")
     linhas.append(linha_tabela(
         "Nota Fiscal",
-        f"{fonte_nf} (NF pág. {dados_nf['pagina']})" if fonte_nf else "NF não localizada no processo", bool(fonte_nf),
+        f"{fonte_nf} ({pagina_nf_desc})" if fonte_nf else "NF não localizada no processo", bool(fonte_nf),
         doc_nf or "não encontrada no documento", bool(doc_nf),
         comparar_numeros(fonte_nf, doc_nf) if fonte_nf and doc_nf else None,
     ))
@@ -3330,6 +3357,19 @@ def gerar_conformidade(nome_arquivo, paginas, nome_planilha=None):
         if sigla:
             bloco["sigla"] = sigla
         tabelas.append(bloco)
+
+    # NS (SIAFI CONNS) e DF/DARF (SIAFI CONDARF): mesmas telas e mesma lógica do almoxarifado
+    # (processar_ns_almoxarifado/processar_df_almoxarifado não são específicas dele - só recebem
+    # dados_of/dados_capa como parâmetros OPCIONAIS, que não existem no processo de serviço; sem
+    # eles, a linha de Empenho cai pro BD sozinho e "Processo do empenho"/"ND" (que dependem da
+    # Capa de Pagamento, documento que serviço não tem) simplesmente não aparecem nessas NS)
+    tabelas.extend(processar_ns_almoxarifado(nome_arquivo, paginas, contrato, None, dados_nf, None, processo_p1)
+                   or [_bloco_ausente(nome_arquivo, "Nota de Lançamento de Sistema (NS)", dados_parecer)])
+    bloco_df = processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, processo_p1)
+    if bloco_df:
+        tabelas.append(bloco_df)
+    elif _calcular_retencao(contrato, dados_nf):
+        tabelas.append(_bloco_ausente(nome_arquivo, "DARF (DF)", dados_parecer))
 
     consistencia = processar_consistencia_documentos(nome_arquivo, tabelas, processo_p1, contrato, dados_nf, dados_parecer)
     if consistencia:
