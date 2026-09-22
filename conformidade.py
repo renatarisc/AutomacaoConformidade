@@ -245,19 +245,41 @@ def obter_dados_nf(paginas):
     # e sim inferida do mês inicial do "Período de referência" - aí o intervalo bruto é destacado
     # junto da competência em todo bloco que a exibe (ver _fonte_nf)
     competencia_periodo = "" if ns.RE_COMPETENCIA.search(texto_nf) else ns.extrair_periodo_referencia_nf(texto_nf)
+    numero = ns.extrair_numero_nf(texto_nf)
+    valor = _primeiro_grupo(RE_VALOR_SERVICO_NF.search(texto_nf), RE_VALOR_SERVICO_NF_CAMPOS.search(texto_nf))
+    cnpj = _primeiro_grupo(RE_CNPJ_PRESTADOR_NF.search(texto_nf), RE_CNPJ_PRESTADOR_NF_CAMPOS.search(texto_nf))
+    # DANFE (nota de MATERIAL, não de serviço) caindo no fluxo de serviço - acontece quando o
+    # processo é de aquisição de material mas o fornecedor não está cadastrado no banco como
+    # almoxarifado (sem isso não dá pra rotear certo - ver gerar_conformidade). Os regexes de NFS-e
+    # acima (rótulos "Número da NFS-e"/"Valor do Serviço"/"Prestador do Serviço") não casam com o
+    # layout de DANFE, mas nº/CNPJ do emitente/valor total SÃO extraíveis - reaproveita os mesmos
+    # regexes já usados pro DANFE de almoxarifado (RE_DANFE_*, _cnpj_fornecedor), só como fallback
+    # quando o campo de NFS-e veio vazio. "Competência" fica de fora de propósito: nota de material
+    # não tem período de serviço - _danfe=True avisa solicitar_dados_manuais_nf pra não pedir isso.
+    eh_danfe = "CHAVE DE ACESSO" in texto_nf
+    if eh_danfe:
+        if not numero:
+            m_num_danfe = RE_DANFE_NUMERO.search(texto_nf)
+            numero = _num_nf(m_num_danfe.group(1)) if m_num_danfe else numero
+        if not valor:
+            m_valor_danfe = RE_DANFE_VALOR_NOTA.search(texto_nf)
+            valor = m_valor_danfe.group(1) if m_valor_danfe else valor
+        if not cnpj:
+            cnpj = _cnpj_fornecedor(re.findall(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", texto_nf))
     return {
         "paginas": paginas_nf,
-        "nf": ns.extrair_numero_nf(texto_nf),
+        "nf": numero,
         "emissao": ns.extrair_data_emissao_nf(texto_nf),
         "competencia": ns.extrair_competencia_nf(texto_nf),
         "competencia_periodo": competencia_periodo,
-        "valor": _primeiro_grupo(RE_VALOR_SERVICO_NF.search(texto_nf), RE_VALOR_SERVICO_NF_CAMPOS.search(texto_nf)),
+        "valor": valor,
         "valor_liquido": _primeiro_grupo(RE_VALOR_LIQUIDO_NF.search(texto_nf), RE_VALOR_LIQUIDO_NF_CAMPOS.search(texto_nf)),
-        "cnpj": _primeiro_grupo(RE_CNPJ_PRESTADOR_NF.search(texto_nf), RE_CNPJ_PRESTADOR_NF_CAMPOS.search(texto_nf)),
+        "cnpj": cnpj,
         "contrato": match_contrato.group(1) if match_contrato else "",
         "banco": f"{match_bancario.group(1).strip()} ({match_bancario.group(2)})" if match_bancario else "",
         "agencia": match_bancario.group(3) if match_bancario else "",
         "conta": match_bancario.group(4) if match_bancario else "",
+        "_danfe": eh_danfe,
     }
 
 def pagina_nf_str(dados_nf):
@@ -386,7 +408,10 @@ def solicitar_dados_manuais_nf(nome_arquivo, dados_nf):
     # botões da própria janela - fechar pelo X não conta como decisão (ver _ao_fechar).
     if not dados_nf:
         return
-    campos_faltando = [c for c in ("emissao", "competencia", "valor") if not dados_nf.get(c)]
+    # DANFE (nota de material caindo no fluxo de serviço - ver obter_dados_nf) não tem competência
+    # de verdade (sem período de serviço prestado) - não faz sentido pedir pra digitar
+    campos_relevantes = ("emissao", "valor") if dados_nf.get("_danfe") else ("emissao", "competencia", "valor")
+    campos_faltando = [c for c in campos_relevantes if not dados_nf.get(c)]
     if not campos_faltando:
         return
 
@@ -456,6 +481,14 @@ RE_CONTRATO_AUTORITATIVO = (
 )
 
 def _numero_contrato_no_pdf(paginas):
+    # aquisição via credenciamento na plataforma Contrata+Brasil (ex: GAMBA/gêneros alimentícios)
+    # não tem contrato no formato N/AAAA em lugar nenhum do processo (nem na Solicitação de
+    # Empenho, nem no Instrumento de Cobrança - lá o campo "Contrato:" vem preenchido com o nº do
+    # empenho, ex: "2026NE000014", não um contrato de verdade) - "Contrata+Brasil" aparece citado
+    # no Assunto da capa do processo, e é literalmente o valor que o usuário cadastra em
+    # numero_contrato pra esse tipo de aquisição (ver contratos_db) - usa direto como desambiguador
+    if any("Contrata+Brasil" in texto for texto in paginas):
+        return "Contrata+Brasil"
     # 1) um padrão autoritativo (Solicitação de Empenho / Instrumento de Cobrança) que diz qual é
     #    o contrato do empenho/pagamento - vale mesmo com outros contratos citados de passagem no
     #    processo; se houver mais de um distinto, usa o último (ciclo mais recente)
@@ -1574,7 +1607,10 @@ def _linha_empenho(doc_empenhos, contrato, dados_of, rotulo_ausente="não citado
     empenhos_of = list((dados_of or {}).get("empenhos") or [])
     if empenhos_of:
         reforco_bd = "; BD" if empenhos_bd else ""  # só cita "BD" quando o BD realmente corrobora
-        fonte_texto, fonte_disp = f"{', '.join(empenhos_of)} (OF pág. {dados_of['pagina']}{reforco_bd})", True
+        # rótulo "OF" no caso normal, "NE" quando a fonte é a Nota de Empenho (sem OF - ver
+        # obter_dados_ne/_rotulo)
+        rotulo_fonte = dados_of.get("_rotulo", "OF")
+        fonte_texto, fonte_disp = f"{', '.join(empenhos_of)} ({rotulo_fonte} pág. {dados_of['pagina']}{reforco_bd})", True
     elif empenhos_bd:
         fonte_texto, fonte_disp = f"{', '.join(empenhos_bd)} (BD)", True
     else:
@@ -1868,6 +1904,63 @@ def processar_ordem_fornecimento(nome_arquivo, paginas, contrato, dados_of):
 
     return montar_tabela(nome_arquivo, "Ordem de Serviço / Fornecimento", indice + 1, linhas, observacao)
 
+# ------- Almoxarifado: Nota de Empenho (aquisição sem OF, pedido direto pelo empenho) -------
+# aquisição via credenciamento (ex: Contrata+Brasil) não gera Ordem de Fornecimento - o pedido é
+# feito direto contra o empenho, então a própria Nota de Empenho (tela do SIAFI/Compras.gov,
+# "Impressão Completa") faz o papel de autorização/limite que a OF faz no fluxo normal: usada como
+# fallback de dados_of quando obter_dados_of não acha nada (ver _conformidade_almoxarifado) - por
+# isso devolve o MESMO formato de dict (pagina/valor_total/empenhos/itens/itens_texto), só sem
+# "numero" (a NE não tem um "nº/ano" equivalente ao da OF) e com "_rotulo": "NE" pra quem exibe
+# saber trocar "(OF pág. X)" por "(NE pág. X)" (ver _linha_empenho/_bloco_cruzamento_itens).
+RE_NE_NUMERO = re.compile(r"(\d{4})\s+NE\s+(\d+)")
+RE_NE_VALOR = re.compile(r"Global\s+[\d.]+\.\d+-\d+\s+[\d,]+\s+([\d.,]+)")
+# item: "<seq 3díg> <valor_item> Item compra: <código> ... <data> Inclusão <quantidade>
+# <valor_unitário> <valor_total>" - rótulos e valores intercalados pela extração em colunas do
+# pypdf, igual aos outros documentos de almoxarifado. "Inclusão" some o "ã" na extração (\S? tolera)
+RE_NE_ITEM = re.compile(
+    r"(\d{3})\s+[\d.,]+\s+Item compra:\s*(\d+).*?"
+    r"\d{2}/\d{2}/\d{4}\s+Inclus\S?o\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)", re.DOTALL)
+
+def _localizar_nota_empenho(paginas):
+    # cabeçalho (nº/ano, valor, data) numa página, "Lista de Itens" (quantidade/valor unit./total
+    # por item) na seguinte - mesmo raciocínio de junção de páginas dos outros documentos. Última
+    # ocorrência, caso o empenho tenha sido reemitido.
+    indices = [i for i, t in enumerate(paginas)
+               if "Nota de Empenho" in t and "Impressão Completa" in t and "Ano Tipo Número" in t]
+    if not indices:
+        return None, None
+    indice = indices[-1]
+    return indice, remover_duplicatas_consecutivas("\n".join(paginas[indice:indice + 2]))
+
+def obter_dados_ne(paginas):
+    # só chamada quando obter_dados_of não achou nada - ver _conformidade_almoxarifado
+    indice, texto = _localizar_nota_empenho(paginas)
+    if texto is None:
+        return None
+
+    m_num = RE_NE_NUMERO.search(texto)
+    empenho = f"{m_num.group(1)}NE{int(m_num.group(2)):06d}" if m_num else None
+    m_valor = RE_NE_VALOR.search(texto)
+
+    itens = []
+    for m in RE_NE_ITEM.finditer(texto):
+        itens.append({
+            "num_item": m.group(1), "descricao": "", "unidade": "",
+            "quantidade": m.group(3), "parcela": None, "quant_solicitada": None,
+            "valor_unitario": m.group(4), "valor_total": m.group(5),
+        })
+
+    return {
+        "pagina": indice + 1,
+        "numero": None,  # NE não tem um "nº/ano" equivalente ao da OF
+        "valor_total": m_valor.group(1) if m_valor else None,
+        "assinatura": None, "execucao_inicio": None, "execucao_fim": None,
+        "empenhos": [empenho] if empenho else [],
+        "itens_texto": "",
+        "itens": itens,
+        "_rotulo": "NE",
+    }
+
 # ------- Almoxarifado / Documento 2: Nota Fiscal (DANFE - NF-e de material) -------
 
 # a NF de almoxarifado é uma DANFE (venda de mercadoria), layout totalmente diferente da NFS-e de
@@ -2045,10 +2138,16 @@ def _bloco_cruzamento_itens(nome_arquivo, dados_of, dados_nf, dados_trd, pendent
     itens_nf  = (dados_nf  or {}).get("itens") or []
     itens_trd = (dados_trd or {}).get("itens") or []
     itens_lim = list(pendentes) if pendentes else ((dados_of or {}).get("itens") or [])
-    rotulo_lim = "Pendente" if pendentes else "OF"
+    # rótulo do limite: "OF" no caso normal, "NE" quando a aquisição não tem Ordem de Fornecimento
+    # e o pedido foi feito direto pelo empenho (ver obter_dados_ne/_rotulo)
+    rotulo_lim = "Pendente" if pendentes else (dados_of or {}).get("_rotulo", "OF")
     tot_lim = _somar_itens(pendentes) if pendentes else (dados_of or {}).get("valor_total")
     if not (itens_lim or itens_nf or itens_trd):
         return None
+
+    # texto do limite pra mensagem de problema: "pendente" / "autorizado no empenho" (NE, sem OF) /
+    # "autorizado na OF" (caso normal)
+    rotulo_autorizado = "pendente" if pendentes else ("autorizado no empenho" if rotulo_lim == "NE" else "autorizado na OF")
 
     cruzados = _cruzar_por_valor_unitario(itens_lim, itens_nf, itens_trd)
     linhas = []
@@ -2065,7 +2164,7 @@ def _bloco_cruzamento_itens(nome_arquivo, dados_of, dados_nf, dados_trd, pendent
 
         problemas = []
         if nf and not lim:
-            problemas.append(f"faturado item fora do {'pendente' if pendentes else 'autorizado na OF'}")
+            problemas.append(f"faturado item fora do {rotulo_autorizado}")
         if nf and not trd:
             problemas.append("entregue mas fora do recebimento")
         if trd and not nf:
@@ -2075,7 +2174,7 @@ def _bloco_cruzamento_itens(nome_arquivo, dados_of, dados_nf, dados_trd, pendent
             problemas.append("NF ≠ recebimento (têm que ser exatos)")
         if nf and lim and not (_valor_ate(nf["quantidade"], lim["quantidade"])
                                and _valor_ate(nf["valor_total"], lim["valor_total"])):
-            problemas.append(f"NF acima do {'pendente' if pendentes else 'autorizado na OF'}")
+            problemas.append(f"NF acima do {rotulo_autorizado}")
 
         bate = None if (nf is None and trd is None) else (not problemas)
         col_texto = " | ".join(col_doc) if col_doc else "-"
@@ -2139,7 +2238,10 @@ def _registrar_itens_nao_entregues(contrato, dados_of, dados_nf, pendentes=None)
     # (OF X) --> ..." com o que AINDA falta pagar daquela OF. 1ª NF: OF inteira menos o que a NF
     # pagou. NF seguinte da mesma OF: o que estava pendente menos o que esta NF pagou. Quando não
     # sobra nada, a linha é removida. Só mexe quando a reconciliação fecha (soma == LIMITE − NF).
-    if not (contrato and contrato.get("id") and dados_of and dados_nf):
+    # Exige "numero" (OF de verdade) - aquisição sem OF (pedido direto pelo empenho, ver
+    # obter_dados_ne) não tem um identificador único pra essa linha (o empenho já é rastreado à
+    # parte) e cairia todo mundo na mesma chave vazia - melhor não registrar do que misturar.
+    if not (contrato and contrato.get("id") and dados_of and dados_of.get("numero") and dados_nf):
         return
     itens_lim = list(pendentes) if pendentes else (dados_of.get("itens") or [])
     itens_nf = dados_nf.get("itens") or []
@@ -2247,7 +2349,7 @@ def _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of, 
         # valor de referência None de propósito: "citou um empenho da OF" já é conferido documento a
         # documento (_linha_empenho); aqui o que importa é que os documentos citem o MESMO empenho
         # entre si, então a comparação passa a ser doc-a-doc (ver `referencia` no laço abaixo)
-        "Empenho": (f"{empenhos_of} (OF)" if empenhos_of else "—", bool(empenhos_of), None),
+        "Empenho": (f"{empenhos_of} ({dados_of.get('_rotulo', 'OF')})" if empenhos_of else "—", bool(empenhos_of), None),
         "Valor": (f"{dados_nf.get('valor_total')} (NF)" if dados_nf.get("valor_total") else "—",
                   bool(dados_nf.get("valor_total")), dados_nf.get("valor_total")),
         "Retenção": (f"{_float_para_valor_br(ret['retencao'])} (MC)" if ret else "—",
@@ -2661,7 +2763,10 @@ def processar_termo_recebimento_definitivo(nome_arquivo, paginas, contrato, dado
 
 # ------- Almoxarifado / Documento 7: Instrumentos de Cobrança (contratos.gov.br) -------
 
-RE_IC_CONTRATO = re.compile(r"Contrato:\s*([\d./]+)")
+# captura o token inteiro (não só dígitos/pontuação) porque em aquisições sem contrato de verdade
+# (ex: credenciamento via Contrata+Brasil) o Contratos.gov.br preenche esse campo com o Nº DO
+# EMPENHO em vez de um contrato ("Contrato: 2026NE000014") - ver detecção logo abaixo
+RE_IC_CONTRATO = re.compile(r"Contrato:\s*(\S+)")
 RE_IC_NUMERO = re.compile(r"N[úu]mero:\s*(\d+)", re.IGNORECASE)
 RE_IC_EMISSAO = re.compile(r"Dt\.\s*Emiss[ãa]o:\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
 RE_IC_VALOR_FAT = re.compile(r"Valor Faturado:\s*R\$\s*([\d.,]+)", re.IGNORECASE)
@@ -2692,11 +2797,19 @@ def processar_instrumento_cobranca_almoxarifado(nome_arquivo, paginas, contrato,
     linhas = []
 
     m_contrato = RE_IC_CONTRATO.search(texto)
-    doc_contrato = m_contrato.group(1) if m_contrato else None
+    doc_contrato_bruto = m_contrato.group(1) if m_contrato else None
+    # quando a aquisição não tem contrato de verdade (credenciamento via Contrata+Brasil, ex:
+    # GAMBA), o campo "Contrato:" vem preenchido com o Nº DO EMPENHO ("2026NE000014") - não é uma
+    # citação de contrato pra conferir (já confere certo contra o empenho na linha "Empenho" logo
+    # abaixo), então trata como indisponível em vez de comparar contra numero_contrato (dava ❌
+    # sem sentido: só "2026" batia no regex antigo, que parava nas letras de "NE")
+    contrato_e_empenho = bool(doc_contrato_bruto) and bool(RE_ALMOX_NE.fullmatch(doc_contrato_bruto))
+    doc_contrato = None if contrato_e_empenho else doc_contrato_bruto
     fonte_contrato = contrato["numero_contrato"] if contrato else None
     linhas.append(linha_tabela(
         "Contrato", f"{fonte_contrato} (BD)" if fonte_contrato else "contrato não encontrado no banco", bool(fonte_contrato),
-        doc_contrato or "não encontrado no documento", bool(doc_contrato),
+        (f"{doc_contrato_bruto} (nº do empenho - sem contrato nessa aquisição)" if contrato_e_empenho
+         else doc_contrato or "não encontrado no documento"), bool(doc_contrato),
         comparar_numeros(fonte_contrato, doc_contrato) if fonte_contrato and doc_contrato else None,
     ))
 
@@ -3088,23 +3201,36 @@ def _conformidade_almoxarifado(nome_arquivo, paginas, contrato, processo_p1, nom
     # cada documento produz dados de referência (dados_of, dados_nf, ...) que os seguintes conferem
     # contra. Implementado documento a documento; os demais entram aqui conforme forem definidos.
     dados_of = obter_dados_of(paginas)
+    # aquisição via credenciamento (ex: Contrata+Brasil) não gera OF - o pedido é feito direto pelo
+    # empenho, então a própria Nota de Empenho faz esse papel (ver obter_dados_ne). dados_of_ref é o
+    # que TODOS os outros documentos usam como referência de itens/empenho/valor (OF quando existe,
+    # senão NE) - só processar_ordem_fornecimento continua recebendo o dados_of real (é o bloco da
+    # OF em si; sem OF de verdade não tem o que mostrar ali).
+    dados_ne = None if dados_of else obter_dados_ne(paginas)
+    dados_of_ref = dados_of or dados_ne
     dados_nf = obter_dados_nf_almoxarifado(paginas)
     dados_trd = obter_dados_trd(paginas)
     dados_optante = obter_dados_optante(paginas)
     dados_capa = obter_dados_capa_pagamento(paginas)  # fonte segura do subelemento conferido pela IC
 
     doc_ausente = lambda nome: _bloco_ausente(nome_arquivo, nome, None, motivo="Documento não detectado no processo")
+    bloco_of = processar_ordem_fornecimento(nome_arquivo, paginas, contrato, dados_of)
+    if not bloco_of:
+        bloco_of = (_bloco_ausente(nome_arquivo, "Ordem de Serviço / Fornecimento", None,
+                        motivo=f"Pedido feito direto pelo Empenho (NE pág. {dados_ne['pagina']}) - "
+                                "aquisição sem Ordem de Fornecimento (informativo)")
+                    if dados_ne else doc_ausente("Ordem de Serviço / Fornecimento"))
     tabelas = [
-        processar_ordem_fornecimento(nome_arquivo, paginas, contrato, dados_of) or doc_ausente("Ordem de Serviço / Fornecimento"),
-        processar_nota_fiscal_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_nf) or doc_ausente("Nota Fiscal"),
-        processar_encaminhamento_material(nome_arquivo, paginas, contrato, dados_of, dados_nf) or doc_ausente("Encaminhamento de Material"),
-        processar_despacho_ateste_material(nome_arquivo, paginas, contrato, dados_of, dados_nf) or doc_ausente("Despacho de Ateste de Nota Fiscal de Material"),
-        processar_capa_pagamento(nome_arquivo, paginas, contrato, dados_of, dados_nf) or doc_ausente("Capa de Pagamento"),
-        processar_termo_recebimento_definitivo(nome_arquivo, paginas, contrato, dados_of, processo_p1) or doc_ausente("Termo de Recebimento Definitivo"),
-        processar_instrumento_cobranca_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_nf, processo_p1, dados_optante, dados_capa) or doc_ausente("Instrumentos de Cobrança"),
+        bloco_of,
+        processar_nota_fiscal_almoxarifado(nome_arquivo, paginas, contrato, dados_of_ref, dados_nf) or doc_ausente("Nota Fiscal"),
+        processar_encaminhamento_material(nome_arquivo, paginas, contrato, dados_of_ref, dados_nf) or doc_ausente("Encaminhamento de Material"),
+        processar_despacho_ateste_material(nome_arquivo, paginas, contrato, dados_of_ref, dados_nf) or doc_ausente("Despacho de Ateste de Nota Fiscal de Material"),
+        processar_capa_pagamento(nome_arquivo, paginas, contrato, dados_of_ref, dados_nf) or doc_ausente("Capa de Pagamento"),
+        processar_termo_recebimento_definitivo(nome_arquivo, paginas, contrato, dados_of_ref, processo_p1) or doc_ausente("Termo de Recebimento Definitivo"),
+        processar_instrumento_cobranca_almoxarifado(nome_arquivo, paginas, contrato, dados_of_ref, dados_nf, processo_p1, dados_optante, dados_capa) or doc_ausente("Instrumentos de Cobrança"),
     ]
     # cada NS vira um bloco próprio (nº + página no título); nenhuma -> placeholder de ausente
-    tabelas.extend(processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_nf, dados_capa, processo_p1)
+    tabelas.extend(processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of_ref, dados_nf, dados_capa, processo_p1)
                    or [doc_ausente("Nota de Lançamento de Sistema (NS)")])
     # DF (DARF do SIAFI): só cobra ausência quando há tributação federal no contrato (senão não existe DF)
     bloco_df = processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, processo_p1)
@@ -3115,18 +3241,19 @@ def _conformidade_almoxarifado(nome_arquivo, paginas, contrato, processo_p1, nom
     # a tela da Receita "Consulta Optante pelo Simples Nacional" (imagem/OCR) é igual à de
     # serviço - reaproveita o mesmo processador
     tabelas.append(processar_consulta_optante(nome_arquivo, paginas, contrato) or doc_ausente("Consulta Optante pelo Simples Nacional"))
-    consistencia = _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of, dados_nf, processo_p1, dados_capa)
+    consistencia = _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of_ref, dados_nf, processo_p1, dados_capa)
     if consistencia:
         tabelas.append(consistencia)
     # se a Observação do contrato já tem itens pendentes desta MESMA OF (de um processo anterior),
-    # é contra eles que a nova NF é cruzada - não contra a OF inteira
+    # é contra eles que a nova NF é cruzada - não contra a OF inteira. Só existe pra OF de verdade
+    # (a NE não tem um "nº/ano" equivalente pra rastrear pendência entre processos)
     of_num_curto = _num_curto((dados_of or {}).get("numero"))
     pendentes = _parse_itens_pendentes(contrato.get("observacao"), of_num_curto) if (contrato and of_num_curto) else None
 
-    cruzamento = _bloco_cruzamento_itens(nome_arquivo, dados_of, dados_nf, dados_trd, pendentes, contrato)
+    cruzamento = _bloco_cruzamento_itens(nome_arquivo, dados_of_ref, dados_nf, dados_trd, pendentes, contrato)
     if cruzamento:
         tabelas.append(cruzamento)
-        _registrar_itens_nao_entregues(contrato, dados_of, dados_nf, pendentes)  # atualiza a pendência no BD
+        _registrar_itens_nao_entregues(contrato, dados_of_ref, dados_nf, pendentes)  # atualiza a pendência no BD
 
     _registrar_pagamento_ns_planilha(contrato, tabelas, processo_p1, nome_planilha)  # anota o pagamento na aba NS da Planilha de Controle
     return tabelas
