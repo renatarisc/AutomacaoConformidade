@@ -469,6 +469,11 @@ def solicitar_dados_manuais_nf(nome_arquivo, dados_nf):
 
 # ------- contrato no banco (fonte segura) -------
 
+# a própria capa do processo (pág. 1, campo "Tipo") já diz se é pagamento de MATERIAL ou de
+# SERVIÇO - usado por gerar_conformidade como sinal de classificação quando o contrato não está
+# cadastrado no banco (sem isso não tem como saber o tipo pelo BD)
+RE_TIPO_PAGAMENTO_MATERIAL = re.compile(r"Pagamento\s+de\s+nota\s+fiscal\s+de\s+material", re.IGNORECASE)
+
 # nº do contrato citado no processo ("Contrato: 17/2023", "contrato nº 68/2024", "DO CONTRATO N
 # 17/2023") - desambigua quando a empresa tem mais de um contrato no banco (mesmo CNPJ)
 RE_CONTRATO_LOCALIZAR = re.compile(r"[Cc]ontrato\s*:?\s*n?[ºo°]?\s*(\d{1,4}/\d{4})", re.IGNORECASE)
@@ -3268,7 +3273,16 @@ def gerar_conformidade(nome_arquivo, paginas, nome_planilha=None):
     processo_p1 = match_processo_p1.group() if match_processo_p1 else None
 
     contrato = localizar_contrato(paginas)
-    if (contrato or {}).get("tipo_contrato") == "almoxarifado":
+    # sem cadastro no banco não dá pra saber o tipo pelo contrato - mas o PDF avisa sozinho: tem
+    # Ordem de Fornecimento (documento exclusivo de almoxarifado) ou a própria capa do processo já
+    # classifica como "Pagamento de nota fiscal de material" (vs "...de prestador de serviço").
+    # Confirmado pelo usuário 2026-09-21 (1340.pdf, AMBARLAB sem cadastro): "se ele tem uma ordem
+    # de fornecimento, ele é um contrato de almoxarifado". Só usa esse fallback quando NÃO achou
+    # contrato - se achou, o tipo_contrato cadastrado é sempre a fonte de verdade.
+    eh_almoxarifado_por_conteudo = (not contrato) and (
+        any("Ordem de Serviço / Fornecimento" in t for t in paginas)
+        or bool(RE_TIPO_PAGAMENTO_MATERIAL.search(paginas[0])))
+    if (contrato or {}).get("tipo_contrato") == "almoxarifado" or eh_almoxarifado_por_conteudo:
         return _conformidade_almoxarifado(nome_arquivo, paginas, contrato, processo_p1, nome_planilha)
 
     dados_nf = obter_dados_nf(paginas)
