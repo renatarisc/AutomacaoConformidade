@@ -2100,41 +2100,120 @@ def _cruzar_por_valor_unitario(itens_of, itens_nf, itens_trd):
 def _somar_itens(itens):
     return _float_para_valor_br(sum(_valor_para_float(i["valor_total"]) or 0 for i in (itens or [])))
 
-def _calcular_retencao(contrato, dados_nf):
-    # memória de cálculo da retenção tributária sobre o valor da NF. Código DARF e alíquotas vêm do
-    # CADASTRO DO CONTRATO (aba Tributação); a base é o valor total da nota. Devolve dict com
-    # base / itens [(rótulo, alíquota %, valor)] / retencao (total) / liquido / codigo_darf, ou None
-    # quando não há contrato, não há valor da NF, ou nenhum tributo incide.
+# ------- Memória de Cálculo (MC) - tela do próprio Suap com a retenção já calculada -------
+# usada como FALLBACK em _calcular_retencao quando o contrato não tem a tributação cadastrada no
+# banco (comum - fica em branco até alguém configurar) - a MC já traz código do DARF, alíquota e
+# valores retidos impressos, então dá pra montar a mesma "memória de cálculo" sem depender do
+# cadastro. Mesmo modelo de página nos dois fluxos (confirmado no 1213.pdf - serviço - e antes no
+# 1029.pdf - almoxarifado). O cadastro do BD continua PREFERENCIAL quando existe (ver _calcular_retencao).
+RE_MC_CODIGO_DARF = re.compile(r"DETALHAMENTO\s*[–-]\s*TRIBUTOS FEDERAIS\s*\((\d+)\)", re.IGNORECASE)
+RE_MC_ALIQUOTA_FEDERAL_TOTAL = re.compile(r"TOTAL:\s*([\d,]+)\s*%", re.IGNORECASE)
+RE_MC_VALOR_BRUTO = re.compile(r"Valor bruto da Nota Fiscal\s*R\$\s*([\d.,]+)", re.IGNORECASE)
+RE_MC_FEDERAIS_RETIDOS = re.compile(r"Tributos federais retidos\s*R\$\s*([\d.,]+)", re.IGNORECASE)
+RE_MC_ISS_RETIDO = re.compile(r"ISS retido\s*R\$\s*([\d.,]+)", re.IGNORECASE)
+RE_MC_PREV_RETIDA = re.compile(r"Contribui\S?[ãa]o previdenci\S?ria retida\s*R\$\s*([\d.,]+)", re.IGNORECASE)
+RE_MC_LIQUIDO = re.compile(r"Valor l\Dquido a pagar.*?R\$\s*([\d.,]+)", re.IGNORECASE | re.DOTALL)
+
+def _localizar_mc(paginas):
+    indices = [i for i, t in enumerate(paginas) if "MEMÓRIA DE CÁLCULO TRIBUTÁRIA" in t]
+    if not indices:
+        return None, None
+    indice = indices[-1]
+    return indice, paginas[indice]
+
+def obter_dados_mc(paginas):
+    indice, texto = _localizar_mc(paginas)
+    if texto is None:
+        return None
+    m_cod = RE_MC_CODIGO_DARF.search(texto)
+    m_aliq = RE_MC_ALIQUOTA_FEDERAL_TOTAL.search(texto)
+    m_base = RE_MC_VALOR_BRUTO.search(texto)
+    m_fed = RE_MC_FEDERAIS_RETIDOS.search(texto)
+    m_iss = RE_MC_ISS_RETIDO.search(texto)
+    m_prev = RE_MC_PREV_RETIDA.search(texto)
+    m_liq = RE_MC_LIQUIDO.search(texto)
+    return {
+        "pagina": indice + 1,
+        "codigo_darf": m_cod.group(1) if m_cod else None,
+        "aliquota_federal_total": m_aliq.group(1) if m_aliq else None,
+        "base": m_base.group(1) if m_base else None,
+        "federais_retidos": m_fed.group(1) if m_fed else None,
+        "iss_retido": m_iss.group(1) if m_iss else None,
+        "previdenciaria_retida": m_prev.group(1) if m_prev else None,
+        "liquido": m_liq.group(1) if m_liq else None,
+    }
+
+def _calcular_retencao(contrato, dados_nf, dados_mc=None):
+    # memória de cálculo da retenção tributária sobre o valor da NF. Preferência: CADASTRO DO
+    # CONTRATO (aba Tributação) - fonte de verdade quando existe; sem cadastro, cai pra própria MC
+    # do processo (ver obter_dados_mc acima), quando o PDF a traz. A base é o valor total da nota.
+    # Devolve dict com base / itens [(rótulo, alíquota %, valor)] / retencao (total) / liquido /
+    # codigo_darf / fonte ("bd"/"mc") / pagina_mc (só quando fonte="mc"), ou None quando não há
+    # contrato nem MC, não há valor da NF, ou nenhum tributo incide em nenhuma das duas fontes.
     # "valor_total" é a chave do dados_nf de almoxarifado (obter_dados_nf_almoxarifado); "valor" é a
     # do dados_nf de serviço (obter_dados_nf) - essa função atende os 2 fluxos (NS/DF do SIAFI são
     # as mesmas telas nos dois).
     base = _valor_para_float((dados_nf or {}).get("valor_total") or (dados_nf or {}).get("valor"))
-    if not contrato or base is None:
+    if base is None and dados_mc:
+        base = _valor_para_float(dados_mc.get("base"))
+    if base is None:
         return None
 
     itens = []  # (rótulo, alíquota %)
-    if contrato.get("federais_incide") and contrato.get("federais_aliquota_total"):
-        codigo = contrato.get("federais_codigo_darf")
-        itens.append((f"DARF {codigo}" if codigo else "Tributos federais", float(contrato["federais_aliquota_total"])))
-    if contrato.get("iss_incide") and contrato.get("iss_aliquota"):
-        itens.append(("ISS", float(contrato["iss_aliquota"])))
-    if contrato.get("previdenciaria_incide") and contrato.get("previdenciaria_aliquota"):
-        itens.append(("Previdenciária", float(contrato["previdenciaria_aliquota"])))
+    if contrato:
+        if contrato.get("federais_incide") and contrato.get("federais_aliquota_total"):
+            codigo = contrato.get("federais_codigo_darf")
+            itens.append((f"DARF {codigo}" if codigo else "Tributos federais", float(contrato["federais_aliquota_total"])))
+        if contrato.get("iss_incide") and contrato.get("iss_aliquota"):
+            itens.append(("ISS", float(contrato["iss_aliquota"])))
+        if contrato.get("previdenciaria_incide") and contrato.get("previdenciaria_aliquota"):
+            itens.append(("Previdenciária", float(contrato["previdenciaria_aliquota"])))
+
     if not itens:
-        return None
+        return _calcular_retencao_da_mc(base, dados_mc)
 
     detalhado = [(rotulo, aliquota, round(base * aliquota / 100, 2)) for rotulo, aliquota in itens]
     total = round(sum(v for _, _, v in detalhado), 2)
     return {"base": base, "itens": detalhado, "retencao": total,
-            "liquido": round(base - total, 2), "codigo_darf": contrato.get("federais_codigo_darf")}
+            "liquido": round(base - total, 2), "codigo_darf": contrato.get("federais_codigo_darf"), "fonte": "bd"}
+
+def _calcular_retencao_da_mc(base, dados_mc):
+    # fallback de _calcular_retencao quando o contrato não tem tributação cadastrada no banco -
+    # monta o mesmo formato de dict a partir dos valores já impressos na MC do processo (ver
+    # obter_dados_mc). Um item por tipo de tributo com retenção > 0 na MC; a alíquota do federal
+    # vem do "TOTAL: X%" impresso, a de ISS/Previdenciária (raro incidir junto com federal nesse
+    # tipo de contrato, mas cobre o caso) é recalculada (retido/base) por não vir com % explícito.
+    if not dados_mc:
+        return None
+    detalhado = []
+    federais = _valor_para_float(dados_mc.get("federais_retidos"))
+    if federais:
+        aliquota = _valor_para_float(dados_mc.get("aliquota_federal_total"))
+        if aliquota is None:
+            aliquota = round(federais / base * 100, 2)
+        codigo = dados_mc.get("codigo_darf")
+        detalhado.append((f"DARF {codigo}" if codigo else "Tributos federais", aliquota, federais))
+    iss = _valor_para_float(dados_mc.get("iss_retido"))
+    if iss:
+        detalhado.append(("ISS", round(iss / base * 100, 2), iss))
+    previdenciaria = _valor_para_float(dados_mc.get("previdenciaria_retida"))
+    if previdenciaria:
+        detalhado.append(("Previdenciária", round(previdenciaria / base * 100, 2), previdenciaria))
+    if not detalhado:
+        return None
+    total = round(sum(v for _, _, v in detalhado), 2)
+    liquido = _valor_para_float(dados_mc.get("liquido"))
+    return {"base": base, "itens": detalhado, "retencao": total,
+            "liquido": liquido if liquido is not None else round(base - total, 2),
+            "codigo_darf": dados_mc.get("codigo_darf"), "fonte": "mc", "pagina_mc": dados_mc.get("pagina")}
 
 def _aliquota_br(p):  # 5.85 -> "5,85%" ; 2.0 -> "2%"
     return f"{p:.2f}".replace(".", ",").rstrip("0").rstrip(",") + "%"
 
-def _memoria_calculo_retencao(contrato, dados_nf):
+def _memoria_calculo_retencao(contrato, dados_nf, dados_mc=None):
     # observação em vermelho: "DARF 6147 (5,85%) --> 48,06 - 2,81 = 45,25" (vários tributos:
     # "DARF ... + ISS (2%) --> base - r1 - r2 = líquido").
-    ret = _calcular_retencao(contrato, dados_nf)
+    ret = _calcular_retencao(contrato, dados_nf, dados_mc)
     if not ret:
         return None
     rotulos = [f"{rotulo} ({_aliquota_br(aliquota)})" for rotulo, aliquota, _ in ret["itens"]]
@@ -2145,18 +2224,21 @@ def _memoria_calculo_retencao(contrato, dados_nf):
 def _texto_calculado_mc(ret, dados_nf, liquido=False):
     # observação em vermelho dos blocos cuja fonte segura é a memória de cálculo (MC): mostra o
     # valor que o SISTEMA calculou e como. "Calculado: 2,81 — DARF 6147 5,85% sobre 48,06 (cadastro
-    # do contrato)"; para o líquido: "Calculado: 45,25 — 48,06 − 2,81 (valor bruto − retenção)".
+    # do contrato)"; para o líquido: "Calculado: 45,25 — 48,06 − 2,81 (valor bruto − retenção)". Se
+    # ret veio da própria MC do processo (sem cadastro no contrato - ver
+    # _calcular_retencao_da_mc), o rótulo final reflete isso em vez de "cadastro do contrato"
     if not ret:
         return None
     bruto_br = (dados_nf or {}).get("valor_total") or (dados_nf or {}).get("valor")
+    origem = f"MC pág. {ret['pagina_mc']}" if ret.get("fonte") == "mc" else "cadastro do contrato"
     if liquido:
         return (f"Calculado: {_float_para_valor_br(ret['liquido'])} — "
                 f"{bruto_br} - {_float_para_valor_br(ret['retencao'])} (valor bruto - retenção)")
     tributos = " + ".join(f"{rot} {_aliquota_br(al)}" for rot, al, _ in ret["itens"])
     return (f"Calculado: {_float_para_valor_br(ret['retencao'])} — "
-            f"{tributos} sobre {bruto_br} (cadastro do contrato)")
+            f"{tributos} sobre {bruto_br} ({origem})")
 
-def _bloco_cruzamento_itens(nome_arquivo, dados_of, dados_nf, dados_trd, pendentes=None, contrato=None):
+def _bloco_cruzamento_itens(nome_arquivo, dados_of, dados_nf, dados_trd, pendentes=None, contrato=None, dados_mc=None):
     # cruza os itens dos documentos de almoxarifado:
     #   LIMITE = quantidade que ainda pode ser paga - a OF inteira na 1ª NF, ou o que ficou
     #            PENDENTE (registrado na Observação do contrato) quando a mesma OF volta num
@@ -2236,7 +2318,7 @@ def _bloco_cruzamento_itens(nome_arquivo, dados_of, dados_nf, dados_trd, pendent
     # continua sendo gravada na Observação do contrato por _registrar_itens_nao_entregues (fora daqui).
 
     return montar_tabela(nome_arquivo, "Cruzamento de Itens (OF × NF × Recebimento)", None, linhas,
-                         _memoria_calculo_retencao(contrato, dados_nf))
+                         _memoria_calculo_retencao(contrato, dados_nf, dados_mc))
 
 def _num_curto(numero):
     # "00004/2026" -> "4/2026" ; "00049" -> "49"
@@ -2348,9 +2430,9 @@ def _nome_curto_doc_almox(documento):
         return f"NS {m.group(1)}" if m else "NS"
     return _NOMES_CURTOS_DOC_ALMOX.get(documento, documento)
 
-def _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of, dados_nf, processo_p1, dados_capa=None):
+def _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of, dados_nf, processo_p1, dados_capa=None, dados_mc=None):
     dados_of, dados_nf, dados_capa = dados_of or {}, dados_nf or {}, dados_capa or {}
-    ret = _calcular_retencao(contrato, dados_nf)
+    ret = _calcular_retencao(contrato, dados_nf, dados_mc)
     fonte_cnpj = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
     fonte_vig = None
     if contrato and contrato.get("vigencia_inicio") and contrato.get("vigencia_fim"):
@@ -2971,16 +3053,22 @@ def _papel_ns(texto, valor_float, bruto, ret):
 
 _ROTULO_PAPEL_NS = {"liquidacao": "liquidação", "pagamento": "pagamento", "retencao": "retenção"}
 
-def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_nf, dados_capa, processo_p1):
+def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_nf, dados_capa, processo_p1,
+                               tem_capa_pagamento=True, dados_mc=None):
     # UM bloco por NS (o usuário quer cada NS numa saída separada, com nº e página no título).
     # Cada bloco leva bloco["papel_ns"] = liquidacao|pagamento|retencao|"" - usado pelo bloco de
     # Consistência (que pula NS) e por _registrar_pagamento_ns_planilha.
+    # tem_capa_pagamento=False (fluxo de serviço, que não tem esse documento - confirmado pelo
+    # usuário) suprime as linhas "Processo do empenho"/"ND" mesmo quando a NS cita esses campos -
+    # diferente de "Capa de Pagamento não localizada no processo" (almoxarifado, documento existe
+    # mas não foi achado - alerta de verdade), aqui o documento simplesmente não existe nesse
+    # fluxo, então mostrar a linha só gera ➖ permanente sem nada de fato pra conferir.
     lista_ns = _coletar_ns(paginas)
     if not lista_ns:
         return []
     dados_nf = dados_nf or {}
     dados_capa = dados_capa or {}
-    ret = _calcular_retencao(contrato, dados_nf)
+    ret = _calcular_retencao(contrato, dados_nf, dados_mc)
     # "valor_total"/"pagina" (chaves do dados_nf de almoxarifado) ou "valor"/"paginas" (chaves do
     # dados_nf de serviço, "paginas" é uma LISTA) - essa função atende os 2 fluxos, ver
     # _calcular_retencao acima
@@ -3057,7 +3145,7 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
                 linhas.append(_linha_empenho(empenhos_ns, contrato, dados_of))
 
             m_pe = RE_NS_PROCESSO_EMPENHO.search(t)  # 2º processo, entre parênteses na OBSERVAÇÃO
-            if m_pe:
+            if m_pe and tem_capa_pagamento:
                 fonte_pe = dados_capa.get("processo_empenho")
                 linhas.append(linha_tabela(
                     "Processo do empenho",
@@ -3067,7 +3155,7 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
                 ))
 
             m_nd = RE_NS_ND.search(t)  # CLAS.ORC no espelho
-            if m_nd:
+            if m_nd and tem_capa_pagamento:
                 fonte_nd = dados_capa.get("natureza_despesa")
                 linhas.append(linha_tabela(
                     "ND",
@@ -3078,10 +3166,13 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
 
             m_darf = RE_NS_DARF_OBS.search(t)  # "... (DARF 6147)" na OBSERVAÇÃO
             if m_darf:
-                fonte_darf = contrato.get("federais_codigo_darf") if contrato else None
+                # BD é preferencial; sem cadastro, usa o código já impresso na própria MC do
+                # processo (ver _calcular_retencao/obter_dados_mc)
+                fonte_darf = (contrato.get("federais_codigo_darf") if contrato else None) or (ret or {}).get("codigo_darf")
+                rotulo_fonte_darf = "BD" if (contrato and contrato.get("federais_codigo_darf")) else f"MC pág. {ret['pagina_mc']}" if ret and ret.get("fonte") == "mc" else "BD"
                 linhas.append(linha_tabela(
                     "Código DARF",
-                    f"{fonte_darf} (BD / MC)" if fonte_darf else "código DARF não cadastrado no contrato", bool(fonte_darf),
+                    f"{fonte_darf} ({rotulo_fonte_darf})" if fonte_darf else "código DARF não cadastrado no contrato", bool(fonte_darf),
                     m_darf.group(1), True,
                     comparar_numeros(fonte_darf, m_darf.group(1)) if fonte_darf else None,
                 ))
@@ -3094,21 +3185,26 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
 
     return blocos
 
-def processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, processo_p1):
+def processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, processo_p1, dados_mc=None):
     idx = next((i for i, t in enumerate(paginas) if "CONSULTA-CONDARF" in t), None)
     if idx is None:
         return None
     texto = paginas[idx]
     dados_nf = dados_nf or {}
-    ret = _calcular_retencao(contrato, dados_nf)
+    ret = _calcular_retencao(contrato, dados_nf, dados_mc)
     linhas = []
+
+    # BD é preferencial; sem cadastro, usa o que já veio calculado na MC do processo (ver
+    # _calcular_retencao/obter_dados_mc) - rótulo da fonte reflete de onde veio de fato
+    rotulo_fonte_ret = "BD" if (contrato and contrato.get("federais_codigo_darf")) else \
+        (f"MC pág. {ret['pagina_mc']}" if ret and ret.get("fonte") == "mc" else "BD")
 
     m_rec = RE_DF_RECEITA.search(texto.split("VALORES", 1)[0])
     doc_receita = m_rec.group(1) if m_rec else None
-    fonte_receita = contrato.get("federais_codigo_darf") if contrato else None
+    fonte_receita = (contrato.get("federais_codigo_darf") if contrato else None) or (ret or {}).get("codigo_darf")
     linhas.append(linha_tabela(
         "Código Receita",
-        f"{fonte_receita} (BD / MC)" if fonte_receita else "código DARF não cadastrado no contrato", bool(fonte_receita),
+        f"{fonte_receita} ({rotulo_fonte_ret})" if fonte_receita else "código DARF não cadastrado no contrato", bool(fonte_receita),
         doc_receita or "não encontrado no documento", bool(doc_receita),
         comparar_numeros(fonte_receita, doc_receita) if fonte_receita and doc_receita else None,
     ))
@@ -3118,7 +3214,7 @@ def processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, process
     fonte_total = _float_para_valor_br(ret["retencao"]) if ret else None
     linhas.append(linha_tabela(
         "Retenção",
-        f"{fonte_total} (MC)" if fonte_total else "retenção não calculável (sem tributação no contrato)", bool(fonte_total),
+        f"{fonte_total} ({rotulo_fonte_ret})" if fonte_total else "retenção não calculável (sem tributação no contrato)", bool(fonte_total),
         doc_total or "não encontrado no documento", bool(doc_total),
         _valores_monetarios_batem(fonte_total, doc_total) if fonte_total and doc_total else None,
     ))
@@ -3251,6 +3347,7 @@ def _conformidade_almoxarifado(nome_arquivo, paginas, contrato, processo_p1, nom
     dados_trd = obter_dados_trd(paginas)
     dados_optante = obter_dados_optante(paginas)
     dados_capa = obter_dados_capa_pagamento(paginas)  # fonte segura do subelemento conferido pela IC
+    dados_mc = obter_dados_mc(paginas)  # fallback de retenção quando o contrato não tem tributação cadastrada
 
     doc_ausente = lambda nome: _bloco_ausente(nome_arquivo, nome, None, motivo="Documento não detectado no processo")
     bloco_of = processar_ordem_fornecimento(nome_arquivo, paginas, contrato, dados_of)
@@ -3269,18 +3366,19 @@ def _conformidade_almoxarifado(nome_arquivo, paginas, contrato, processo_p1, nom
         processar_instrumento_cobranca_almoxarifado(nome_arquivo, paginas, contrato, dados_of_ref, dados_nf, processo_p1, dados_optante, dados_capa) or doc_ausente("Instrumentos de Cobrança"),
     ]
     # cada NS vira um bloco próprio (nº + página no título); nenhuma -> placeholder de ausente
-    tabelas.extend(processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of_ref, dados_nf, dados_capa, processo_p1)
+    tabelas.extend(processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of_ref, dados_nf, dados_capa, processo_p1,
+                                              dados_mc=dados_mc)
                    or [doc_ausente("Nota de Lançamento de Sistema (NS)")])
-    # DF (DARF do SIAFI): só cobra ausência quando há tributação federal no contrato (senão não existe DF)
-    bloco_df = processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, processo_p1)
+    # DF (DARF do SIAFI): só cobra ausência quando há tributação federal no contrato ou na MC (senão não existe DF)
+    bloco_df = processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, processo_p1, dados_mc)
     if bloco_df:
         tabelas.append(bloco_df)
-    elif _calcular_retencao(contrato, dados_nf):
+    elif _calcular_retencao(contrato, dados_nf, dados_mc):
         tabelas.append(doc_ausente("DARF (DF)"))
     # a tela da Receita "Consulta Optante pelo Simples Nacional" (imagem/OCR) é igual à de
     # serviço - reaproveita o mesmo processador
     tabelas.append(processar_consulta_optante(nome_arquivo, paginas, contrato) or doc_ausente("Consulta Optante pelo Simples Nacional"))
-    consistencia = _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of_ref, dados_nf, processo_p1, dados_capa)
+    consistencia = _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of_ref, dados_nf, processo_p1, dados_capa, dados_mc)
     if consistencia:
         tabelas.append(consistencia)
     # se a Observação do contrato já tem itens pendentes desta MESMA OF (de um processo anterior),
@@ -3289,7 +3387,7 @@ def _conformidade_almoxarifado(nome_arquivo, paginas, contrato, processo_p1, nom
     of_num_curto = _num_curto((dados_of or {}).get("numero"))
     pendentes = _parse_itens_pendentes(contrato.get("observacao"), of_num_curto) if (contrato and of_num_curto) else None
 
-    cruzamento = _bloco_cruzamento_itens(nome_arquivo, dados_of_ref, dados_nf, dados_trd, pendentes, contrato)
+    cruzamento = _bloco_cruzamento_itens(nome_arquivo, dados_of_ref, dados_nf, dados_trd, pendentes, contrato, dados_mc)
     if cruzamento:
         tabelas.append(cruzamento)
         _registrar_itens_nao_entregues(contrato, dados_of_ref, dados_nf, pendentes)  # atualiza a pendência no BD
@@ -3323,6 +3421,7 @@ def gerar_conformidade(nome_arquivo, paginas, nome_planilha=None):
     solicitar_dados_manuais_nf(nome_arquivo, dados_nf)
     dados_parecer = obter_dados_parecer(paginas)
     dados_optante = obter_dados_optante(paginas)  # tela da Receita = fonte segura do Optante pelo Simples (ver IC)
+    dados_mc = obter_dados_mc(paginas)  # fallback de retenção quando o contrato não tem tributação cadastrada
 
     # contrato sem mão de obra não tem IMR nem Termo Circunstanciado do Gestor (a conferência
     # começa na NF) - nesses dois o placeholder de "não detectado" é suprimido; se ainda assim o
@@ -3361,14 +3460,16 @@ def gerar_conformidade(nome_arquivo, paginas, nome_planilha=None):
     # NS (SIAFI CONNS) e DF/DARF (SIAFI CONDARF): mesmas telas e mesma lógica do almoxarifado
     # (processar_ns_almoxarifado/processar_df_almoxarifado não são específicas dele - só recebem
     # dados_of/dados_capa como parâmetros OPCIONAIS, que não existem no processo de serviço; sem
-    # eles, a linha de Empenho cai pro BD sozinho e "Processo do empenho"/"ND" (que dependem da
-    # Capa de Pagamento, documento que serviço não tem) simplesmente não aparecem nessas NS)
-    tabelas.extend(processar_ns_almoxarifado(nome_arquivo, paginas, contrato, None, dados_nf, None, processo_p1)
+    # eles, a linha de Empenho cai pro BD sozinho). tem_capa_pagamento=False (confirmado pelo
+    # usuário: processo de serviço não tem Capa de Pagamento) suprime "Processo do empenho"/"ND" -
+    # sem isso ficariam sempre ➖ (nunca tem fonte pra conferir nesse fluxo)
+    tabelas.extend(processar_ns_almoxarifado(nome_arquivo, paginas, contrato, None, dados_nf, None, processo_p1,
+                                              tem_capa_pagamento=False, dados_mc=dados_mc)
                    or [_bloco_ausente(nome_arquivo, "Nota de Lançamento de Sistema (NS)", dados_parecer)])
-    bloco_df = processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, processo_p1)
+    bloco_df = processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, processo_p1, dados_mc)
     if bloco_df:
         tabelas.append(bloco_df)
-    elif _calcular_retencao(contrato, dados_nf):
+    elif _calcular_retencao(contrato, dados_nf, dados_mc):
         tabelas.append(_bloco_ausente(nome_arquivo, "DARF (DF)", dados_parecer))
 
     consistencia = processar_consistencia_documentos(nome_arquivo, tabelas, processo_p1, contrato, dados_nf, dados_parecer)
