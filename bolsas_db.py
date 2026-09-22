@@ -3,12 +3,23 @@ import csv
 import os
 import shutil
 import sqlite3
+import sys
 from datetime import datetime
+
+def _pasta_base():
+    # com o app empacotado (PyInstaller --onefile), __file__ deste módulo aponta pra dentro da
+    # pasta temporária de extração (sys._MEIPASS) - nova a cada execução do .exe, apagada quando
+    # ele fecha. Em modo congelado, banco e backups precisam ficar ao lado do .exe de verdade
+    # (sys.executable), senão "esquecem" tudo a cada fechamento (mesmo bug já corrigido em
+    # contratos_db.py - ver [[project-menu-and-packaging]]).
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 # mesmo padrão de contratos_db.py: sqlite nativo (sem dependência externa), banco e backups
 # próprios (não compartilha arquivo com contratos.db) - ver [[project-menu-and-packaging]]
-CAMINHO_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bolsas.db")
-PASTA_BACKUPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bolsas_backups")
+CAMINHO_DB = os.path.join(_pasta_base(), "bolsas.db")
+PASTA_BACKUPS = os.path.join(_pasta_base(), "bolsas_backups")
 MAX_BACKUPS = 300
 
 _ESQUEMA_SQL = """
