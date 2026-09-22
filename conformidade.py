@@ -1431,6 +1431,13 @@ def _float_para_valor_br(numero):
 # sistema são sempre iguais ao "Valor do Serviço" da própria NF - ver Documento 1)
 _CAMPOS_CONSISTENCIA = {
     "CNPJ": ["CNPJ"],
+    "Contrato": ["Contrato"],
+    "Contratada": ["Contratada"],
+    # "Objeto" (Termo Circunstanciado) e "Tipo de serviço" (Despacho de Ateste) são o mesmo dado,
+    # só com rótulo diferente por documento - mesmo raciocínio de Fornecedor/Interessado no
+    # almoxarifado (ver _CAMPOS_CONSISTENCIA_ALMOX)
+    "Objeto": ["Objeto", "Tipo de serviço"],
+    "Vigência": ["Vigência"],
     "Processo": ["Processo"],
     "Nota Fiscal": ["Nota Fiscal"],
     "Competência": ["Competência"],
@@ -1439,6 +1446,12 @@ _CAMPOS_CONSISTENCIA = {
     # "Empenho" (singular) é o rótulo que a NS usa (via _linha_empenho, compartilhada com o
     # almoxarifado) - "Empenhos" (plural) é o do Instrumento de Cobrança
     "Empenhos": ["Empenhos", "Empenho"],
+    # NS/DF (SIAFI) - ver processar_ns_almoxarifado/processar_df_almoxarifado, também usados pro
+    # fluxo de serviço (ver gerar_conformidade). "DARF" é só o federal (DARF/CONDARF),
+    # "Líquido" é a NS de pagamento
+    "DARF": ["DARF"],
+    "Líquido": ["Líquido"],
+    "Código DARF": ["Código DARF", "Código Receita"],
 }
 
 def _comparar_conjuntos(a, b):
@@ -1467,12 +1480,19 @@ def _valor_ate(a, b):
 
 _COMPARADOR_CONSISTENCIA = {
     "CNPJ": comparar_cnpjs,
+    "Contrato": comparar_numeros,
+    "Contratada": comparar_textos,
+    "Objeto": comparar_textos,
+    "Vigência": lambda a, b: a == b,
     "Processo": comparar_textos,
     "Competência": lambda a, b: a == b,  # já vem normalizado (ver _valor_comparavel)
     "Período": lambda a, b: a == b,
     "Valor": _valores_monetarios_batem,
     "Nota Fiscal": comparar_numeros,
     "Empenhos": _comparar_conjuntos,
+    "DARF": _valores_monetarios_batem,
+    "Líquido": _valores_monetarios_batem,
+    "Código DARF": comparar_numeros,
 }
 
 def _valor_comparavel(texto_documento):
@@ -1492,7 +1512,7 @@ _NOMES_CURTOS_DOCUMENTO = {
     "Consulta Optante pelo Simples Nacional": "Consulta Optante",
 }
 
-def processar_consistencia_documentos(nome_arquivo, blocos, processo_p1, contrato, dados_nf, dados_parecer):
+def processar_consistencia_documentos(nome_arquivo, blocos, processo_p1, contrato, dados_nf, dados_parecer, dados_mc=None):
     # roda DEPOIS dos outros processadores (precisa da lista de blocos já pronta pra vasculhar) -
     # por lógica de negócio, a mesma informação conferida em documentos distintos do mesmo processo
     # precisa ser igual entre si, não só bater cada uma isoladamente contra a fonte segura (pedido
@@ -1515,15 +1535,38 @@ def processar_consistencia_documentos(nome_arquivo, blocos, processo_p1, contrat
     fonte_cnpj_fmt = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
     fonte_empenhos_lista = empenhos_registrados(contrato) if contrato else []
     fonte_empenhos_ref = ", ".join(fonte_empenhos_lista) if fonte_empenhos_lista else None
+    # NS/DF (SIAFI) - mesma referência (BD/MC) que processar_ns_almoxarifado/processar_df_almoxarifado
+    # usam pro fluxo de serviço (ver gerar_conformidade)
+    ret = _calcular_retencao(contrato, dados_nf, dados_mc)
+    fonte_codigo_darf = (contrato.get("federais_codigo_darf") if contrato else None) or (ret or {}).get("codigo_darf")
+    rotulo_fonte_ret = f"MC pág. {ret['pagina_mc']}" if ret and ret.get("fonte") == "mc" else "BD"
+    # dados do próprio contrato (BD) - mesma lógica já usada em IMR/Termo Circunstanciado/Despacho,
+    # aqui centralizada pra alimentar o cruzamento entre eles (ver _CAMPOS_CONSISTENCIA)
+    fonte_contratada = contrato.get("nome_contratada") if contrato else None
+    fonte_contrato_num = contrato.get("numero_contrato") if contrato else None
+    fonte_objeto = (contrato.get("objeto_detalhado") or contrato.get("objeto_resumido")) if contrato else None
+    fonte_vigencia = None
+    if contrato and contrato.get("vigencia_inicio") and contrato.get("vigencia_fim"):
+        fonte_vigencia = f"{_formatar_data_iso(contrato['vigencia_inicio'])} a {_formatar_data_iso(contrato['vigencia_fim'])}"
 
     fontes = {
         "CNPJ": (f"{fonte_cnpj_fmt} (BD)" if fonte_cnpj_fmt else "contrato não encontrado no banco", bool(fonte_cnpj_fmt), fonte_cnpj_fmt),
+        "Contrato": (f"{fonte_contrato_num} (BD)" if fonte_contrato_num else "contrato não encontrado no banco", bool(fonte_contrato_num), fonte_contrato_num),
+        "Contratada": (f"{fonte_contratada} (BD)" if fonte_contratada else "contrato não encontrado no banco", bool(fonte_contratada), fonte_contratada),
+        "Objeto": (f"{fonte_objeto} (BD)" if fonte_objeto else "contrato não encontrado no banco", bool(fonte_objeto), fonte_objeto),
+        "Vigência": (f"{fonte_vigencia} (BD)" if fonte_vigencia else "contrato não encontrado no banco", bool(fonte_vigencia), fonte_vigencia),
         "Processo": (f"{processo_p1} (pág. 1)" if processo_p1 else "não encontrado", bool(processo_p1), processo_p1),
         "Competência": (fonte_comp_texto, fonte_comp_disp, competencia_ref),
         "Período": (f"{fonte_periodo} (calculado c/ base na competência)" if fonte_periodo else "depende da competência", bool(fonte_periodo), fonte_periodo),
         "Valor": (fonte_valor_texto, fonte_valor_disp, valor_ref),
         "Nota Fiscal": (fonte_nf_texto, fonte_nf_disp, nf_ref),
         "Empenhos": (f"{fonte_empenhos_ref} (BD)" if fonte_empenhos_ref else ("nenhum empenho cadastrado nesse contrato" if contrato else "contrato não encontrado no banco"), bool(fonte_empenhos_ref), fonte_empenhos_ref),
+        "DARF": (f"{_float_para_valor_br(ret['retencao_federal'])} ({rotulo_fonte_ret})" if ret else "—",
+                 bool(ret), _float_para_valor_br(ret["retencao_federal"]) if ret else None),
+        "Líquido": (f"{_float_para_valor_br(ret['liquido'])} ({rotulo_fonte_ret})" if ret else "—",
+                    bool(ret), _float_para_valor_br(ret["liquido"]) if ret else None),
+        "Código DARF": (f"{fonte_codigo_darf} ({rotulo_fonte_ret})" if fonte_codigo_darf else "—",
+                        bool(fonte_codigo_darf), fonte_codigo_darf),
     }
 
     linhas = []
@@ -2172,20 +2215,26 @@ def _calcular_retencao(contrato, dados_nf, dados_mc=None):
     if not itens:
         return _calcular_retencao_da_mc(base, dados_mc)
 
+    # "retencao" = TOTAL (federal + ISS + previdenciária), usado no cálculo do líquido; DF/DARF
+    # (SIAFI CONDARF) só lida com o federal, então "retencao_federal" fica à parte - ver uso em
+    # processar_df_almoxarifado/a linha "DARF" da NS de liquidação
     detalhado = [(rotulo, aliquota, round(base * aliquota / 100, 2)) for rotulo, aliquota in itens]
     total = round(sum(v for _, _, v in detalhado), 2)
-    return {"base": base, "itens": detalhado, "retencao": total,
+    federal = round(sum(v for rotulo, _, v in detalhado
+                         if rotulo == "Tributos federais" or rotulo.startswith("DARF")), 2)
+    return {"base": base, "itens": detalhado, "retencao": total, "retencao_federal": federal,
             "liquido": round(base - total, 2), "codigo_darf": contrato.get("federais_codigo_darf"), "fonte": "bd"}
 
 def _calcular_retencao_da_mc(base, dados_mc):
     # fallback de _calcular_retencao quando o contrato não tem tributação cadastrada no banco -
     # monta o mesmo formato de dict a partir dos valores já impressos na MC do processo (ver
-    # obter_dados_mc). Um item por tipo de tributo com retenção > 0 na MC; a alíquota do federal
-    # vem do "TOTAL: X%" impresso, a de ISS/Previdenciária (raro incidir junto com federal nesse
-    # tipo de contrato, mas cobre o caso) é recalculada (retido/base) por não vir com % explícito.
+    # obter_dados_mc). Um item por tipo de tributo (federal/ISS/previdenciária) com retenção > 0 na
+    # MC - a alíquota do federal vem do "TOTAL: X%" impresso, a de ISS/Previdenciária (a MC não
+    # imprime o "X%" delas na mesma forma) é recalculada (retido/base).
     if not dados_mc:
         return None
     detalhado = []
+    federal_valor = 0.0
     federais = _valor_para_float(dados_mc.get("federais_retidos"))
     if federais:
         aliquota = _valor_para_float(dados_mc.get("aliquota_federal_total"))
@@ -2193,6 +2242,7 @@ def _calcular_retencao_da_mc(base, dados_mc):
             aliquota = round(federais / base * 100, 2)
         codigo = dados_mc.get("codigo_darf")
         detalhado.append((f"DARF {codigo}" if codigo else "Tributos federais", aliquota, federais))
+        federal_valor = federais
     iss = _valor_para_float(dados_mc.get("iss_retido"))
     if iss:
         detalhado.append(("ISS", round(iss / base * 100, 2), iss))
@@ -2203,7 +2253,7 @@ def _calcular_retencao_da_mc(base, dados_mc):
         return None
     total = round(sum(v for _, _, v in detalhado), 2)
     liquido = _valor_para_float(dados_mc.get("liquido"))
-    return {"base": base, "itens": detalhado, "retencao": total,
+    return {"base": base, "itens": detalhado, "retencao": total, "retencao_federal": federal_valor,
             "liquido": liquido if liquido is not None else round(base - total, 2),
             "codigo_darf": dados_mc.get("codigo_darf"), "fonte": "mc", "pagina_mc": dados_mc.get("pagina")}
 
@@ -2233,7 +2283,7 @@ def _texto_calculado_mc(ret, dados_nf, liquido=False):
     origem = f"MC pág. {ret['pagina_mc']}" if ret.get("fonte") == "mc" else "cadastro do contrato"
     if liquido:
         return (f"Calculado: {_float_para_valor_br(ret['liquido'])} — "
-                f"{bruto_br} - {_float_para_valor_br(ret['retencao'])} (valor bruto - retenção)")
+                f"{bruto_br} - {_float_para_valor_br(ret['retencao'])} (valor bruto - DARF)")
     tributos = " + ".join(f"{rot} {_aliquota_br(al)}" for rot, al, _ in ret["itens"])
     return (f"Calculado: {_float_para_valor_br(ret['retencao'])} — "
             f"{tributos} sobre {bruto_br} ({origem})")
@@ -2390,7 +2440,7 @@ _CAMPOS_CONSISTENCIA_ALMOX = {
     "Ordem de Fornecimento": ["Ordem de Fornecimento"],
     "Empenho": ["Empenho", "Empenhos"],
     "Valor": ["Valor", "Valor Faturado", "Valor Líquido"],    # bruto da NF
-    "Retenção": ["Retenção"],                                 # MC x DF x NS de retenção
+    "DARF": ["DARF"],               # MC x DF x NS de liquidação (só federal)
     "Líquido": ["Líquido"],                                   # MC x NS de pagamento
     "ND": ["ND"],                                             # Natureza de Despesa: Capa (fonte) x NS de liquidação
     "Código DARF": ["Código DARF", "Código Receita"],         # NS de liquidação x DF
@@ -2407,7 +2457,7 @@ _COMPARADOR_CONSISTENCIA_ALMOX = {
     "Ordem de Fornecimento": comparar_numeros,
     "Empenho": _comparar_conjuntos,
     "Valor": _valores_monetarios_batem,
-    "Retenção": _valores_monetarios_batem,
+    "DARF": _valores_monetarios_batem,
     "Líquido": _valores_monetarios_batem,
     "ND": _mesmos_digitos,   # "339030.07" x "33903007"
     "Código DARF": comparar_numeros,
@@ -2433,6 +2483,10 @@ def _nome_curto_doc_almox(documento):
 def _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of, dados_nf, processo_p1, dados_capa=None, dados_mc=None):
     dados_of, dados_nf, dados_capa = dados_of or {}, dados_nf or {}, dados_capa or {}
     ret = _calcular_retencao(contrato, dados_nf, dados_mc)
+    # BD preferencial; sem cadastro, cai pro código já impresso na MC (mesma fonte que
+    # processar_df_almoxarifado/processar_ns_almoxarifado usam)
+    fonte_codigo_darf = (contrato.get("federais_codigo_darf") if contrato else None) or (ret or {}).get("codigo_darf")
+    rotulo_fonte_darf = f"MC pág. {ret['pagina_mc']}" if ret and ret.get("fonte") == "mc" else "BD"
     fonte_cnpj = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
     fonte_vig = None
     if contrato and contrato.get("vigencia_inicio") and contrato.get("vigencia_fim"):
@@ -2462,15 +2516,19 @@ def _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of, 
         "Empenho": (f"{empenhos_of} ({dados_of.get('_rotulo', 'OF')})" if empenhos_of else "—", bool(empenhos_of), None),
         "Valor": (f"{dados_nf.get('valor_total')} (NF)" if dados_nf.get("valor_total") else "—",
                   bool(dados_nf.get("valor_total")), dados_nf.get("valor_total")),
-        "Retenção": (f"{_float_para_valor_br(ret['retencao'])} (MC)" if ret else "—",
-                     bool(ret), _float_para_valor_br(ret["retencao"]) if ret else None),
+        # "DARF" cruza contra o bloco DARF (DF) e a linha "DARF" da NS de liquidação, que são só do
+        # federal (ver processar_df_almoxarifado/processar_ns_almoxarifado) - por isso
+        # "retencao_federal", não "retencao" (que soma ISS/previdenciária também, se houver)
+        "DARF": (f"{_float_para_valor_br(ret['retencao_federal'])} (MC)" if ret else "—",
+                 bool(ret), _float_para_valor_br(ret["retencao_federal"]) if ret else None),
         "Líquido": (f"{_float_para_valor_br(ret['liquido'])} (MC)" if ret else "—",
                     bool(ret), _float_para_valor_br(ret["liquido"]) if ret else None),
         "ND": (f"{dados_capa.get('natureza_despesa')} (Capa PG)" if dados_capa.get("natureza_despesa") else "—",
                bool(dados_capa.get("natureza_despesa")), dados_capa.get("natureza_despesa")),
-        "Código DARF": (f"{contrato['federais_codigo_darf']} (BD)" if contrato and contrato.get("federais_codigo_darf") else "—",
-                        bool(contrato and contrato.get("federais_codigo_darf")),
-                        contrato.get("federais_codigo_darf") if contrato else None),
+        "Código DARF": (
+            f"{fonte_codigo_darf} ({rotulo_fonte_darf})" if fonte_codigo_darf else "—",
+            bool(fonte_codigo_darf), fonte_codigo_darf,
+        ),
     }
 
     linhas = []
@@ -2495,8 +2553,8 @@ def _bloco_consistencia_almoxarifado(nome_arquivo, tabelas, contrato, dados_of, 
             # documento(s) onde está errado
             doc_texto = ocorrencias[0][1] if bate else " | ".join(f"{n}: {v}" for n, v in divergentes)
         linha = linha_tabela(campo, fonte_texto, fonte_disp, doc_texto, True, bate)
-        if campo in ("Retenção", "Líquido") and ret:  # o valor da MC é calculado - mostra "Calculado: X" em vermelho ao lado da fonte
-            linha["fonte_extra"] = f"Calculado: {_float_para_valor_br(ret['retencao'] if campo == 'Retenção' else ret['liquido'])}"
+        if campo in ("DARF", "Líquido") and ret:  # o valor da MC é calculado - mostra "Calculado: X" em vermelho ao lado da fonte
+            linha["fonte_extra"] = f"Calculado: {_float_para_valor_br(ret['retencao_federal'] if campo == 'DARF' else ret['liquido'])}"
         linhas.append(linha)
 
     if not linhas:
@@ -3027,11 +3085,19 @@ def _coletar_ns(paginas):
         d["texto"] += "\n" + t
     return list(por_numero.values())
 
-def _valor_da_ns(texto):
-    # o valor da NS aparece repetido na coluna "V A L O R" da tela espelho (uma vez por evento),
-    # sempre o mesmo - pega a 1ª ocorrência depois do cabeçalho da coluna
+def _valores_distintos_ns(texto):
+    # a coluna "V A L O R" da tela espelho repete um valor por evento - normalmente sempre o
+    # mesmo, mas quando a NS de liquidação envolve retenção de tributos ela tem eventos com valor
+    # MAIOR (bruto) e eventos com valor MENOR (a retenção em si) misturados na mesma tabela.
+    # Devolve os valores distintos, do maior pro menor (bruto primeiro).
     corpo = texto.split("V A L O R", 1)
     valores = RE_VALOR_BR_SOLTO.findall(corpo[1]) if len(corpo) > 1 else []
+    distintos = list(dict.fromkeys(valores))  # remove repetidos, preserva ordem de 1ª ocorrência
+    return sorted(distintos, key=lambda v: _valor_para_float(v) or 0, reverse=True)
+
+def _valor_da_ns(texto):
+    # valor "principal" da NS (bruto) - o maior valor distinto da tela espelho
+    valores = _valores_distintos_ns(texto)
     return valores[0] if valores else None
 
 def _papel_ns(texto, valor_float, bruto, ret):
@@ -3079,10 +3145,18 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
     fonte_cnpj = _formatar_cnpj(contrato["cnpj"]) if contrato and contrato.get("cnpj") else None
     fonte_forn = contrato.get("nome_contratada") if contrato else None
 
+    # BD é preferencial; sem cadastro completo (federais_incide + federais_aliquota_total), cai pra
+    # MC do processo (ver _calcular_retencao/obter_dados_mc) - usa ret["fonte"], já calculado por
+    # _calcular_retencao, em vez de re-checar campos do contrato aqui (um contrato pode ter só
+    # federais_codigo_darf cadastrado sem a alíquota - aí ret[fonte] já corretamente cai pra "mc",
+    # mas rechecar só o código aqui embromava o rótulo dizendo "BD" por engano)
+    rotulo_fonte_ret = f"MC pág. {ret['pagina_mc']}" if ret and ret.get("fonte") == "mc" else "BD"
+
     blocos = []
     for ns in sorted(lista_ns, key=lambda x: x["numero"]):
         t = ns["texto"]
-        doc_valor = _valor_da_ns(t)
+        valores_ns = _valores_distintos_ns(t)
+        doc_valor = valores_ns[0] if valores_ns else None
         papel = _papel_ns(t, _valor_para_float(doc_valor), bruto, ret)
         linhas = []
 
@@ -3109,10 +3183,11 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
             fonte_v = valor_nf
             fonte_v_desc = pagina_nf_desc
         elif papel == "pagamento" and ret:
-            fonte_v, fonte_v_desc = _float_para_valor_br(ret["liquido"]), "MC - Líquido"
+            # sem "- Líquido"/"- Retenção" no rótulo - o nome do campo (coluna) já diz isso
+            fonte_v, fonte_v_desc = _float_para_valor_br(ret["liquido"]), rotulo_fonte_ret
             obs_calculado = _texto_calculado_mc(ret, dados_nf, liquido=True)
         elif papel == "retencao" and ret:
-            fonte_v, fonte_v_desc = _float_para_valor_br(ret["retencao"]), "MC - Retenção"
+            fonte_v, fonte_v_desc = _float_para_valor_br(ret["retencao"]), rotulo_fonte_ret
             obs_calculado = _texto_calculado_mc(ret, dados_nf)
         else:
             fonte_v, fonte_v_desc = None, None  # sem contrato/retenção não dá pra dizer o que a NS deveria ter
@@ -3144,6 +3219,21 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
             if empenhos_ns:
                 linhas.append(_linha_empenho(empenhos_ns, contrato, dados_of))
 
+            # a espelho de eventos da NS de liquidação pode trazer 2 valores distintos quando há
+            # retenção de tributos: o bruto (já conferido acima) e a própria retenção, repetida em
+            # 2 eventos (débito/crédito). A OBSERVAÇÃO dessa NS cita especificamente "RETENÇÃO DOS
+            # TRIBUTOS FEDERAIS (DARF X)" - por isso "retencao_federal" (não "retencao", que soma
+            # ISS/previdenciária também, se houver - ver _calcular_retencao)
+            if papel == "liquidacao" and len(valores_ns) > 1:
+                doc_retencao = valores_ns[1]
+                fonte_ret_valor = _float_para_valor_br(ret["retencao_federal"]) if ret else None
+                linhas.append(linha_tabela(
+                    "DARF",
+                    f"{fonte_ret_valor} ({rotulo_fonte_ret})" if fonte_ret_valor else "retenção não calculável (sem tributação no contrato)",
+                    bool(fonte_ret_valor), doc_retencao, True,
+                    _valores_monetarios_batem(fonte_ret_valor, doc_retencao) if fonte_ret_valor else None,
+                ))
+
             m_pe = RE_NS_PROCESSO_EMPENHO.search(t)  # 2º processo, entre parênteses na OBSERVAÇÃO
             if m_pe and tem_capa_pagamento:
                 fonte_pe = dados_capa.get("processo_empenho")
@@ -3169,10 +3259,9 @@ def processar_ns_almoxarifado(nome_arquivo, paginas, contrato, dados_of, dados_n
                 # BD é preferencial; sem cadastro, usa o código já impresso na própria MC do
                 # processo (ver _calcular_retencao/obter_dados_mc)
                 fonte_darf = (contrato.get("federais_codigo_darf") if contrato else None) or (ret or {}).get("codigo_darf")
-                rotulo_fonte_darf = "BD" if (contrato and contrato.get("federais_codigo_darf")) else f"MC pág. {ret['pagina_mc']}" if ret and ret.get("fonte") == "mc" else "BD"
                 linhas.append(linha_tabela(
                     "Código DARF",
-                    f"{fonte_darf} ({rotulo_fonte_darf})" if fonte_darf else "código DARF não cadastrado no contrato", bool(fonte_darf),
+                    f"{fonte_darf} ({rotulo_fonte_ret})" if fonte_darf else "código DARF não cadastrado no contrato", bool(fonte_darf),
                     m_darf.group(1), True,
                     comparar_numeros(fonte_darf, m_darf.group(1)) if fonte_darf else None,
                 ))
@@ -3194,10 +3283,10 @@ def processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, process
     ret = _calcular_retencao(contrato, dados_nf, dados_mc)
     linhas = []
 
-    # BD é preferencial; sem cadastro, usa o que já veio calculado na MC do processo (ver
-    # _calcular_retencao/obter_dados_mc) - rótulo da fonte reflete de onde veio de fato
-    rotulo_fonte_ret = "BD" if (contrato and contrato.get("federais_codigo_darf")) else \
-        (f"MC pág. {ret['pagina_mc']}" if ret and ret.get("fonte") == "mc" else "BD")
+    # BD é preferencial; sem cadastro completo (federais_incide + federais_aliquota_total), cai pra
+    # MC do processo (ver _calcular_retencao/obter_dados_mc) - usa ret["fonte"] direto, ver mesma
+    # correção/comentário em processar_ns_almoxarifado
+    rotulo_fonte_ret = f"MC pág. {ret['pagina_mc']}" if ret and ret.get("fonte") == "mc" else "BD"
 
     m_rec = RE_DF_RECEITA.search(texto.split("VALORES", 1)[0])
     doc_receita = m_rec.group(1) if m_rec else None
@@ -3211,9 +3300,12 @@ def processar_df_almoxarifado(nome_arquivo, paginas, contrato, dados_nf, process
 
     m_tot = RE_DF_TOTAL.search(texto)
     doc_total = m_tot.group(1) if m_tot else None
-    fonte_total = _float_para_valor_br(ret["retencao"]) if ret else None
+    # o DARF/CONDARF é só de tributos FEDERAIS - usa "retencao_federal" (não "retencao", que soma
+    # ISS/previdenciária também), senão um contrato com os 3 tipos incidindo dava falso "não
+    # confere" aqui (o total geral não bate com o que a tela do DARF mostra, que é só o federal)
+    fonte_total = _float_para_valor_br(ret["retencao_federal"]) if ret else None
     linhas.append(linha_tabela(
-        "Retenção",
+        "DARF",
         f"{fonte_total} ({rotulo_fonte_ret})" if fonte_total else "retenção não calculável (sem tributação no contrato)", bool(fonte_total),
         doc_total or "não encontrado no documento", bool(doc_total),
         _valores_monetarios_batem(fonte_total, doc_total) if fonte_total and doc_total else None,
@@ -3472,7 +3564,7 @@ def gerar_conformidade(nome_arquivo, paginas, nome_planilha=None):
     elif _calcular_retencao(contrato, dados_nf, dados_mc):
         tabelas.append(_bloco_ausente(nome_arquivo, "DARF (DF)", dados_parecer))
 
-    consistencia = processar_consistencia_documentos(nome_arquivo, tabelas, processo_p1, contrato, dados_nf, dados_parecer)
+    consistencia = processar_consistencia_documentos(nome_arquivo, tabelas, processo_p1, contrato, dados_nf, dados_parecer, dados_mc)
     if consistencia:
         tabelas.append(consistencia)
 
